@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: annotation-validator
     ports:
-      - "3000:80"
+      - "13333:80"
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
