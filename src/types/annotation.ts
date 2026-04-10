@@ -5,6 +5,10 @@ export enum AnnotationType {
   POLYLINE = 'polyline',   // 折线
   POINT = 'point',         // 点
   SEGMENTATION = 'segmentation', // 语义分割
+  BBOX_3D = 'bbox_3d',     // 3D边界框
+  POLYGON_3D = 'polygon_3d', // 3D多边形
+  POLYLINE_3D = 'polyline_3d', // 3D折线/车道线
+  POINT_3D = 'point_3d',   // 3D点
 }
 
 // 坐标点
@@ -59,13 +63,63 @@ export interface SegmentationAnnotation {
   alpha?: number; // 透明度
 }
 
+// 3D点
+export interface Point3D {
+  x: number;
+  y: number;
+  z: number;
+}
+
+// 3D边界框标注
+export interface BBox3DAnnotation {
+  id: string;
+  type: AnnotationType.BBOX_3D;
+  label: string;
+  center: Point3D; // 中心点 [x, y, z]
+  dimensions: [number, number, number]; // [length, width, height] 长宽高
+  rotation: [number, number, number]; // 欧拉角 [roll, pitch, yaw] 或四元数 [x, y, z, w]
+  rotationType?: 'euler' | 'quaternion'; // 旋转类型，默认为欧拉角
+  color?: string;
+}
+
+// 3D多边形标注
+export interface Polygon3DAnnotation {
+  id: string;
+  type: AnnotationType.POLYGON_3D;
+  label: string;
+  points: Point3D[];
+  color?: string;
+}
+
+// 3D折线标注（车道线等）
+export interface Polyline3DAnnotation {
+  id: string;
+  type: AnnotationType.POLYLINE_3D;
+  label: string;
+  points: Point3D[];
+  color?: string;
+}
+
+// 3D点标注
+export interface Point3DAnnotation {
+  id: string;
+  type: AnnotationType.POINT_3D;
+  label: string;
+  point: Point3D;
+  color?: string;
+}
+
 // 联合类型
 export type Annotation = 
   | BBoxAnnotation 
   | PolygonAnnotation 
   | PolylineAnnotation 
   | PointAnnotation 
-  | SegmentationAnnotation;
+  | SegmentationAnnotation
+  | BBox3DAnnotation
+  | Polygon3DAnnotation
+  | Polyline3DAnnotation
+  | Point3DAnnotation;
 
 // 标注文件格式
 export interface AnnotationFile {

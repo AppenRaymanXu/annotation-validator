@@ -1,10 +1,10 @@
 # Annotation Validator - 标注校验工具
 
-一个用于校验2D标注结果的可视化工具，支持多种标注类型。
+一个用于校验2D/3D标注结果的可视化工具，支持多种标注类型。
 
 ## 功能特性
 
-### 当前支持 (v1.0)
+### 当前支持 (v2.0)
 - **2D图像标注校验**
   - 矩形框 (BBox)
   - 多边形 (Polygon)
@@ -12,11 +12,13 @@
   - 点 (Point)
   - 语义分割 (Segmentation)
 
-### 即将推出
-- 3D 点云标注校验
-- 视频标注校验
-- 音频标注校验
-- 文本标注校验
+- **3D点云标注校验** ✨ 新增
+  - 3D边界框 (BBox3D) - 支持中心点、长宽高、欧拉角/四元数旋转
+  - 3D多边形 (Polygon3D)
+  - 3D折线/车道线 (Polyline3D)
+  - 3D点 (Point3D)
+  - 支持点云文件拖放加载 (JSON, PCD, PLY, LAS)
+  - 3D场景交互（旋转、平移、缩放）
 
 ## 快速开始
 
@@ -136,6 +138,64 @@ docker run -d -p 3000:80 --name annotation-validator annotation-validator
       "label": "road",
       "shape_type": "polygon",
       "points": [[x1, y1], ...]
+    }
+  ]
+}
+```
+
+### 3D 点云标注格式
+
+#### 3D 边界框
+```json
+{
+  "shapes": [
+    {
+      "label": "car",
+      "shape_type": "bbox_3d",
+      "points": [
+        [centerX, centerY, centerZ],  // 中心点坐标
+        [length, width, height],       // 长宽高
+        [roll, pitch, yaw]             // 欧拉角旋转（弧度）
+      ]
+    }
+  ]
+}
+```
+
+#### 3D 多边形
+```json
+{
+  "shapes": [
+    {
+      "label": "road_surface",
+      "shape_type": "polygon_3d",
+      "points": [[x1, y1, z1], [x2, y2, z2], ...]
+    }
+  ]
+}
+```
+
+#### 3D 折线/车道线
+```json
+{
+  "shapes": [
+    {
+      "label": "lane_line",
+      "shape_type": "polyline_3d",
+      "points": [[x1, y1, z1], [x2, y2, z2], ...]
+    }
+  ]
+}
+```
+
+#### 3D 点
+```json
+{
+  "shapes": [
+    {
+      "label": "traffic_light",
+      "shape_type": "point_3d",
+      "points": [[x, y, z]]
     }
   ]
 }

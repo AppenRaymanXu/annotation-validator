@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import { Canvas } from '@/components/Canvas';
+import { PointCloudCanvas } from '@/components/PointCloudCanvas';
 import { JsonEditor } from '@/components/JsonEditor';
 import { FormatGuide } from '@/components/FormatGuide';
 import { Sidebar, DataType } from '@/components/Sidebar';
@@ -13,6 +14,10 @@ import {
   PolylineAnnotation,
   PointAnnotation,
   SegmentationAnnotation,
+  BBox3DAnnotation,
+  Polygon3DAnnotation,
+  Polyline3DAnnotation,
+  Point3DAnnotation,
 } from '@/types/annotation';
 
 // 默认空标注模板
@@ -34,6 +39,7 @@ function App() {
   
   // 图片和标注状态
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [pointCloudUrl, setPointCloudUrl] = useState<string | null>(null);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
   
@@ -102,6 +108,50 @@ function App() {
             points: shape.points.map((p) => ({ x: p[0], y: p[1] })),
           };
           return seg;
+        }
+        // 3D 标注类型
+        case 'bbox_3d': {
+          const bbox3d: BBox3DAnnotation = {
+            id: baseId,
+            type: AnnotationType.BBOX_3D,
+            label,
+            center: { 
+              x: shape.points[0][0], 
+              y: shape.points[0][1], 
+              z: shape.points[0][2] 
+            },
+            dimensions: [shape.points[1][0], shape.points[1][1], shape.points[1][2]],
+            rotation: shape.points[2] as [number, number, number],
+            rotationType: 'euler',
+          };
+          return bbox3d;
+        }
+        case 'polygon_3d': {
+          const polygon3d: Polygon3DAnnotation = {
+            id: baseId,
+            type: AnnotationType.POLYGON_3D,
+            label,
+            points: shape.points.map((p) => ({ x: p[0], y: p[1], z: p[2] })),
+          };
+          return polygon3d;
+        }
+        case 'polyline_3d': {
+          const polyline3d: Polyline3DAnnotation = {
+            id: baseId,
+            type: AnnotationType.POLYLINE_3D,
+            label,
+            points: shape.points.map((p) => ({ x: p[0], y: p[1], z: p[2] })),
+          };
+          return polyline3d;
+        }
+        case 'point_3d': {
+          const point3d: Point3DAnnotation = {
+            id: baseId,
+            type: AnnotationType.POINT_3D,
+            label,
+            point: { x: shape.points[0][0], y: shape.points[0][1], z: shape.points[0][2] },
+          };
+          return point3d;
         }
         default:
           if (shape.points.length === 1) {
@@ -191,6 +241,25 @@ function App() {
     });
   }, []);
 
+  // 处理点云文件
+  const handlePointCloudFile = useCallback((file: File) => {
+    console.log('处理点云文件:', {
+      name: file.name,
+      size: file.size,
+      type: file.type
+    });
+    const url = URL.createObjectURL(file);
+    console.log('创建点云 URL:', url);
+    setPointCloudUrl((prevUrl) => {
+      if (prevUrl) {
+        URL.revokeObjectURL(prevUrl);
+      }
+      return url;
+    });
+    // 保存文件名以便后续使用
+    (window as any).__pointCloudFileName = file.name;
+  }, []);
+
   // 应用JSON编辑器内容
   const handleApplyJson = () => {
     if (parseJsonString(jsonValue)) {
@@ -221,13 +290,30 @@ function App() {
       <div className="flex flex-1 flex-col overflow-hidden">
         {/* 上方画布区域 */}
         <div className="relative flex-1 overflow-hidden">
-          <Canvas
-            imageUrl={imageUrl}
-            annotations={annotations}
-            hiddenIds={hiddenIds}
-            onImageDrop={handleImageFile}
-            className="h-full w-full"
-          />
+          {dataType === 'image2d' ? (
+            <Canvas
+              imageUrl={imageUrl}
+              annotations={annotations}
+              hiddenIds={hiddenIds}
+              onImageDrop={handleImageFile}
+              className="h-full w-full"
+            />
+          ) : dataType === 'pointcloud' ? (
+            <PointCloudCanvas
+              pointCloudUrl={pointCloudUrl}
+              annotations={annotations}
+              hiddenIds={hiddenIds}
+              onPointCloudDrop={handlePointCloudFile}
+              className="h-full w-full"
+            />
+          ) : (
+            <div className="flex items-center justify-center h-full text-muted-foreground">
+              <div className="text-center">
+                <p className="text-lg">该数据类型暂未实现</p>
+                <p className="text-sm mt-2">敬请期待...</p>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* 下方标注输入面板 */}
@@ -312,6 +398,7 @@ function App() {
               {bottomTab === 'guide' && (
                 <FormatGuide
                   onSelectTemplate={handleSelectTemplate}
+                  dataType={dataType}
                   className="h-full"
                 />
               )}

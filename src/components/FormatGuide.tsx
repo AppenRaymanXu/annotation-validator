@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -11,7 +11,8 @@ interface FormatTemplate {
   example: string;
 }
 
-const templates: Record<string, FormatTemplate> = {
+// 2D 标注模板
+const templates2D: Record<string, FormatTemplate> = {
   bbox: {
     title: '矩形框标注',
     description: '用于目标检测任务，标注物体的边界框',
@@ -169,28 +170,162 @@ const templates: Record<string, FormatTemplate> = {
   },
 };
 
+// 3D 点云标注模板
+const templates3D: Record<string, FormatTemplate> = {
+  bbox3d: {
+    title: '3D 边界框',
+    description: '用于点云 3D 目标检测，标注中心点、长宽高和旋转角度',
+    format: `{
+  "shapes": [
+    {
+      "label": "标签名称",
+      "shape_type": "bbox_3d",
+      "points": [
+        [centerX, centerY, centerZ],
+        [length, width, height],
+        [roll, pitch, yaw]
+      ]
+    }
+  ]
+}`,
+    example: `{
+  "shapes": [
+    {
+      "label": "car",
+      "shape_type": "bbox_3d",
+      "points": [
+        [10.5, 1.5, 20.3],
+        [4.5, 1.8, 1.5],
+        [0, 0, 0.785]
+      ]
+    },
+    {
+      "label": "pedestrian",
+      "shape_type": "bbox_3d",
+      "points": [
+        [5.2, 0.9, 15.8],
+        [0.6, 0.6, 1.7],
+        [0, 0, -0.5]
+      ]
+    }
+  ]
+}`,
+  },
+  polygon3d: {
+    title: '3D 多边形',
+    description: '用于点云中的 3D 多边形标注',
+    format: `{
+  "shapes": [
+    {
+      "label": "标签名称",
+      "shape_type": "polygon_3d",
+      "points": [[x1, y1, z1], [x2, y2, z2], ...]
+    }
+  ]
+}`,
+    example: `{
+  "shapes": [
+    {
+      "label": "road_surface",
+      "shape_type": "polygon_3d",
+      "points": [
+        [0, 0, 0],
+        [10, 0, 0],
+        [10, 0, 20],
+        [0, 0, 20]
+      ]
+    }
+  ]
+}`,
+  },
+  polyline3d: {
+    title: '3D 折线/车道线',
+    description: '用于点云中的 3D 车道线、边界线等',
+    format: `{
+  "shapes": [
+    {
+      "label": "标签名称",
+      "shape_type": "polyline_3d",
+      "points": [[x1, y1, z1], [x2, y2, z2], ...]
+    }
+  ]
+}`,
+    example: `{
+  "shapes": [
+    {
+      "label": "lane_line",
+      "shape_type": "polyline_3d",
+      "points": [
+        [0, 0.1, 0],
+        [5, 0.1, 10],
+        [10, 0.1, 20],
+        [15, 0.1, 30]
+      ]
+    }
+  ]
+}`,
+  },
+  point3d: {
+    title: '3D 点',
+    description: '用于点云中的 3D 关键点标注',
+    format: `{
+  "shapes": [
+    {
+      "label": "标签名称",
+      "shape_type": "point_3d",
+      "points": [[x, y, z]]
+    }
+  ]
+}`,
+    example: `{
+  "shapes": [
+    {
+      "label": "traffic_light",
+      "shape_type": "point_3d",
+      "points": [[12.5, 3.2, 25.8]]
+    },
+    {
+      "label": "sign_post",
+      "shape_type": "point_3d",
+      "points": [[8.3, 2.1, 18.5]]
+    }
+  ]
+}`,
+  },
+};
+
 interface FormatGuideProps {
   onSelectTemplate: (template: string) => void;
   className?: string;
+  dataType?: 'image2d' | 'pointcloud' | 'video' | 'audio' | 'text';
 }
 
-export function FormatGuide({ onSelectTemplate, className }: FormatGuideProps) {
-  const [selectedType, setSelectedType] = useState<string>('bbox');
+export function FormatGuide({ onSelectTemplate, className, dataType = 'image2d' }: FormatGuideProps) {
+  const [selectedType, setSelectedType] = useState<string>(dataType === 'pointcloud' ? 'bbox3d' : 'bbox');
   const [showExample, setShowExample] = useState(true);
 
-  const current = templates[selectedType];
+  // 根据数据类型选择模板
+  const templates = dataType === 'pointcloud' ? templates3D : templates2D;
+  const current = templates[selectedType] || Object.values(templates)[0];
+
+  // 数据类型变化时重置选择
+  useEffect(() => {
+    setSelectedType(dataType === 'pointcloud' ? 'bbox3d' : 'bbox');
+  }, [dataType]);
 
   return (
     <div className={cn("flex flex-col", className)}>
       {/* 头部 */}
       <div className="flex items-center justify-between border-b px-3 py-2">
-        <span className="text-sm font-medium">格式说明</span>
+        <span className="text-sm font-medium">
+          格式说明 - {dataType === 'pointcloud' ? '3D 点云' : '2D 图像'}
+        </span>
         <Badge variant="secondary" className="text-xs">模板</Badge>
       </div>
 
       <div className="flex flex-1 overflow-hidden">
         {/* 类型列表 */}
-        <div className="w-36 flex-shrink-0 border-r">
+        <div className="w-40 flex-shrink-0 border-r">
           <ScrollArea className="h-full">
             <div className="p-1">
               {Object.entries(templates).map(([key, template]) => (

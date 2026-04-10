@@ -31,7 +31,7 @@ const dataTypes: DataTypeConfig[] = [
     id: 'pointcloud',
     label: '3D 点云',
     description: '点云标注校验',
-    available: false,
+    available: true,
     icon: (
       <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path

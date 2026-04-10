@@ -23,6 +23,10 @@ const typeLabels: Record<AnnotationType, string> = {
   [AnnotationType.POLYLINE]: '折线',
   [AnnotationType.POINT]: '点',
   [AnnotationType.SEGMENTATION]: '分割',
+  [AnnotationType.BBOX_3D]: '3D框',
+  [AnnotationType.POLYGON_3D]: '3D多边形',
+  [AnnotationType.POLYLINE_3D]: '3D折线',
+  [AnnotationType.POINT_3D]: '3D点',
 };
 
 const typeIcons: Record<AnnotationType, React.ReactNode> = {
@@ -49,6 +53,28 @@ const typeIcons: Record<AnnotationType, React.ReactNode> = {
   [AnnotationType.SEGMENTATION]: (
     <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <path d="M12 3l9 4.5v9L12 21l-9-4.5v-9L12 3z" strokeWidth={2} />
+    </svg>
+  ),
+  [AnnotationType.BBOX_3D]: (
+    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path d="M12 2l10 5v10l-10 5-10-5V7l10-5z" strokeWidth={2} />
+      <path d="M12 12v10M2 7l10 5m10-5l-10 5" strokeWidth={2} />
+    </svg>
+  ),
+  [AnnotationType.POLYGON_3D]: (
+    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path d="M12 2l9 5v10l-9 5-9-5V7l9-5z" strokeWidth={2} />
+    </svg>
+  ),
+  [AnnotationType.POLYLINE_3D]: (
+    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path d="M2 12l5-5 5 5 5-5 5 5" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  [AnnotationType.POINT_3D]: (
+    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="3" strokeWidth={2} />
+      <circle cx="12" cy="12" r="7" strokeWidth={1} strokeDasharray="2 2" />
     </svg>
   ),
 };
