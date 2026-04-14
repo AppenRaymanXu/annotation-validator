@@ -174,17 +174,15 @@ const templates2D: Record<string, FormatTemplate> = {
 const templates3D: Record<string, FormatTemplate> = {
   bbox3d: {
     title: '3D 边界框',
-    description: '用于点云 3D 目标检测，标注中心点、长宽高和旋转角度',
+    description: '用于点云 3D 目标检测，标注中心点、尺寸和旋转角度',
     format: `{
   "shapes": [
     {
       "label": "标签名称",
       "shape_type": "bbox_3d",
-      "points": [
-        [centerX, centerY, centerZ],
-        [length, width, height],
-        [roll, pitch, yaw]
-      ]
+      "center": [x, y, z],
+      "size": [length, width, height],
+      "rotation": [roll, pitch, yaw]
     }
   ]
 }`,
@@ -193,20 +191,16 @@ const templates3D: Record<string, FormatTemplate> = {
     {
       "label": "car",
       "shape_type": "bbox_3d",
-      "points": [
-        [10.5, 1.5, 20.3],
-        [4.5, 1.8, 1.5],
-        [0, 0, 0.785]
-      ]
+      "center": [10.5, 1.5, 20.3],
+      "size": [4.5, 1.8, 1.5],
+      "rotation": [0, 0, 0.785]
     },
     {
       "label": "pedestrian",
       "shape_type": "bbox_3d",
-      "points": [
-        [5.2, 0.9, 15.8],
-        [0.6, 0.6, 1.7],
-        [0, 0, -0.5]
-      ]
+      "center": [5.2, 0.9, 15.8],
+      "size": [0.6, 0.6, 1.7],
+      "rotation": [0, 0, -0.5]
     }
   ]
 }`,

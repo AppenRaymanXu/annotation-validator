@@ -134,7 +134,11 @@ export interface AnnotationData {
   imageHeight?: number;
   shapes: Array<{
     label: string;
-    points: number[][];
+    points?: number[][];  // 旧格式兼容
+    center?: number[];    // 新格式：中心点
+    size?: number[];      // 新格式：尺寸
+    dimensions?: number[]; // 兼容格式：尺寸
+    rotation?: number[];  // 新格式：旋转
     shape_type: string;
     group_id?: string | null;
     description?: string;

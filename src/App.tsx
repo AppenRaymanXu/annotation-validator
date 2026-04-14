@@ -20,13 +20,26 @@ import {
   Point3DAnnotation,
 } from '@/types/annotation';
 
-// 默认空标注模板
-const DEFAULT_ANNOTATION_TEMPLATE = `{
+// 默认空标注模板 - 2D
+const DEFAULT_ANNOTATION_TEMPLATE_2D = `{
   "shapes": [
     {
       "label": "example",
       "shape_type": "rectangle",
       "points": [[100, 100], [200, 200]]
+    }
+  ]
+}`;
+
+// 默认空标注模板 - 3D
+const DEFAULT_ANNOTATION_TEMPLATE_3D = `{
+  "shapes": [
+    {
+      "label": "car",
+      "shape_type": "bbox_3d",
+      "center": [10.5, 1.5, 20.3],
+      "size": [4.5, 1.8, 1.5],
+      "rotation": [0, 0, 0.785]
     }
   ]
 }`;
@@ -43,13 +56,27 @@ function App() {
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
   
+  // 变换矩阵状态
+  const [transformMatrix, setTransformMatrix] = useState<number[] | null>(null);
+  
   // 输入相关状态
   const [bottomTab, setBottomTab] = useState<BottomTab>('editor');
-  const [jsonValue, setJsonValue] = useState(DEFAULT_ANNOTATION_TEMPLATE);
+  const [jsonValue, setJsonValue] = useState(DEFAULT_ANNOTATION_TEMPLATE_2D);
   
   // 面板显示状态
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [bottomPanelCollapsed, setBottomPanelCollapsed] = useState(false);
+
+  // 切换数据类型
+  const handleDataTypeChange = (type: DataType) => {
+    setDataType(type);
+    // 根据数据类型设置默认的 JSON 模板
+    if (type === 'pointcloud') {
+      setJsonValue(DEFAULT_ANNOTATION_TEMPLATE_3D);
+    } else {
+      setJsonValue(DEFAULT_ANNOTATION_TEMPLATE_2D);
+    }
+  };
 
   // 生成唯一ID
   const generateId = () => {
@@ -64,6 +91,9 @@ function App() {
 
       switch (shape.shape_type) {
         case 'rectangle': {
+          if (!shape.points || shape.points.length < 2) {
+            throw new Error('Rectangle shape must have points');
+          }
           const [p1, p2] = shape.points;
           const bbox: BBoxAnnotation = {
             id: baseId,
@@ -74,6 +104,9 @@ function App() {
           return bbox;
         }
         case 'polygon': {
+          if (!shape.points) {
+            throw new Error('Polygon shape must have points');
+          }
           const polygon: PolygonAnnotation = {
             id: baseId,
             type: AnnotationType.POLYGON,
@@ -83,6 +116,9 @@ function App() {
           return polygon;
         }
         case 'line': {
+          if (!shape.points) {
+            throw new Error('Line shape must have points');
+          }
           const polyline: PolylineAnnotation = {
             id: baseId,
             type: AnnotationType.POLYLINE,
@@ -92,6 +128,9 @@ function App() {
           return polyline;
         }
         case 'point': {
+          if (!shape.points || shape.points.length === 0) {
+            throw new Error('Point shape must have points');
+          }
           const point: PointAnnotation = {
             id: baseId,
             type: AnnotationType.POINT,
@@ -101,6 +140,9 @@ function App() {
           return point;
         }
         case 'segmentation': {
+          if (!shape.points) {
+            throw new Error('Segmentation shape must have points');
+          }
           const seg: SegmentationAnnotation = {
             id: baseId,
             type: AnnotationType.SEGMENTATION,
@@ -111,22 +153,59 @@ function App() {
         }
         // 3D 标注类型
         case 'bbox_3d': {
+          // 支持新格式（center, size, rotation）和旧格式（points）
+          let center, dimensions, rotation;
+          
+          if (shape.center && shape.size && shape.rotation) {
+            // 新格式：分离的字段
+            center = { 
+              x: shape.center[0], 
+              y: shape.center[1], 
+              z: shape.center[2] 
+            };
+            dimensions = [shape.size[0], shape.size[1], shape.size[2]];
+            rotation = shape.rotation as [number, number, number];
+          } else if (shape.dimensions && shape.rotation) {
+            // 兼容格式：dimensions
+            if (!shape.points || shape.points.length === 0) {
+              throw new Error('BBox 3D shape with dimensions must have points for center');
+            }
+            center = { 
+              x: shape.points[0][0], 
+              y: shape.points[0][1], 
+              z: shape.points[0][2] 
+            };
+            dimensions = shape.dimensions as [number, number, number];
+            rotation = shape.rotation as [number, number, number];
+          } else {
+            // 旧格式：points 数组
+            if (!shape.points || shape.points.length < 3) {
+              throw new Error('BBox 3D shape in old format must have at least 3 points');
+            }
+            center = { 
+              x: shape.points[0][0], 
+              y: shape.points[0][1], 
+              z: shape.points[0][2] 
+            };
+            dimensions = [shape.points[1][0], shape.points[1][1], shape.points[1][2]];
+            rotation = shape.points[2] as [number, number, number];
+          }
+          
           const bbox3d: BBox3DAnnotation = {
             id: baseId,
             type: AnnotationType.BBOX_3D,
             label,
-            center: { 
-              x: shape.points[0][0], 
-              y: shape.points[0][1], 
-              z: shape.points[0][2] 
-            },
-            dimensions: [shape.points[1][0], shape.points[1][1], shape.points[1][2]],
-            rotation: shape.points[2] as [number, number, number],
+            center,
+            dimensions: dimensions as [number, number, number],
+            rotation: rotation as [number, number, number],
             rotationType: 'euler',
           };
           return bbox3d;
         }
         case 'polygon_3d': {
+          if (!shape.points) {
+            throw new Error('Polygon 3D shape must have points');
+          }
           const polygon3d: Polygon3DAnnotation = {
             id: baseId,
             type: AnnotationType.POLYGON_3D,
@@ -136,6 +215,9 @@ function App() {
           return polygon3d;
         }
         case 'polyline_3d': {
+          if (!shape.points) {
+            throw new Error('Polyline 3D shape must have points');
+          }
           const polyline3d: Polyline3DAnnotation = {
             id: baseId,
             type: AnnotationType.POLYLINE_3D,
@@ -145,6 +227,9 @@ function App() {
           return polyline3d;
         }
         case 'point_3d': {
+          if (!shape.points || shape.points.length === 0) {
+            throw new Error('Point 3D shape must have points');
+          }
           const point3d: Point3DAnnotation = {
             id: baseId,
             type: AnnotationType.POINT_3D,
@@ -154,6 +239,9 @@ function App() {
           return point3d;
         }
         default:
+          if (!shape.points) {
+            throw new Error('Shape must have points');
+          }
           if (shape.points.length === 1) {
             const pt: PointAnnotation = {
               id: baseId,
@@ -198,6 +286,10 @@ function App() {
             shapes: data.shapes.map((s: Record<string, unknown>) => ({
               label: s.label as string,
               points: s.points as number[][],
+              center: s.center as number[],
+              size: s.size as number[],
+              dimensions: s.dimensions as number[],
+              rotation: s.rotation as number[],
               shape_type: (s.shape_type as string) || 'polygon',
               group_id: s.group_id as string | null,
               description: s.description as string,
@@ -208,6 +300,10 @@ function App() {
             shapes: data.map((item: Record<string, unknown>) => ({
               label: (item.label as string) || '',
               points: (item.points as number[][]) || (item.coordinates as number[][]) || [],
+              center: item.center as number[],
+              size: item.size as number[],
+              dimensions: item.dimensions as number[],
+              rotation: item.rotation as number[],
               shape_type: (item.type as string) || (item.shape_type as string) || 'polygon',
               group_id: null,
               description: '',
@@ -220,6 +316,7 @@ function App() {
 
         const parsed = parseAnnotationData(annotationData);
         setAnnotations(parsed);
+        // 使用 useMemo 优化 hiddenIds，避免每次渲染创建新 Set
         setHiddenIds(new Set());
         return true;
       } catch (error) {
@@ -275,12 +372,22 @@ function App() {
     setBottomTab('editor');
   };
 
+  // 应用变换矩阵
+  const handleApplyTransform = (values: number[]) => {
+    setTransformMatrix(values);
+  };
+
+  // 重置变换矩阵
+  const handleResetTransform = () => {
+    setTransformMatrix(null);
+  };
+
   return (
     <div className="flex h-screen overflow-hidden bg-background">
       {/* 左侧边栏 */}
       <Sidebar
         activeType={dataType}
-        onTypeChange={setDataType}
+        onTypeChange={handleDataTypeChange}
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
         className="flex-shrink-0"
@@ -304,6 +411,9 @@ function App() {
               annotations={annotations}
               hiddenIds={hiddenIds}
               onPointCloudDrop={handlePointCloudFile}
+              transformMatrix={transformMatrix}
+              onTransformApply={handleApplyTransform}
+              onTransformReset={handleResetTransform}
               className="h-full w-full"
             />
           ) : (

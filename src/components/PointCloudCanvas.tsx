@@ -19,20 +19,21 @@ interface PointCloudCanvasProps {
   hiddenIds: Set<string>;
   onPointCloudDrop?: (file: File) => void;
   className?: string;
+  transformMatrix?: number[] | null; // 4x4 变换矩阵
+  onTransformApply?: (matrix: number[]) => void; // 应用变换回调
+  onTransformReset?: () => void; // 重置变换回调
 }
 
-// 点云数据格式
-interface PointCloudData {
-  points: number[][]; // [[x, y, z], ...]
-  colors?: number[][]; // [[r, g, b], ...] 可选
-}
 
 export function PointCloudCanvas({ 
   pointCloudUrl, 
   annotations, 
   hiddenIds, 
   onPointCloudDrop,
-  className 
+  className,
+  transformMatrix = null,
+  onTransformApply,
+  onTransformReset
 }: PointCloudCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -43,9 +44,19 @@ export function PointCloudCanvas({
   const annotationGroupRef = useRef<THREE.Group | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [colorMode, setColorMode] = useState<'original' | 'intensity' | 'height'>('original');
+  const [colorMode, setColorMode] = useState<'none' | 'original' | 'intensity' | 'height'>('none');
   const [hasIntensity, setHasIntensity] = useState(false);
   const [hasColor, setHasColor] = useState(false);
+  const [showTransformPanel, setShowTransformPanel] = useState(false);
+  const [matrixInput, setMatrixInput] = useState(`[[1, 0, 0, 0],
+ [0, 1, 0, 0],
+ [0, 0, 1, 0],
+ [0, 0, 0, 1]]`);
+  const [transformInfo, setTransformInfo] = useState<{ 
+    before: [number, number, number]; 
+    after: [number, number, number];
+    offset: [number, number, number];
+  } | null>(null);
 
   // 初始化 Three.js 场景
   useEffect(() => {
@@ -63,9 +74,13 @@ export function PointCloudCanvas({
       0.1,
       10000
     );
-    // 设置相机位置：从右后上方观察
-    camera.position.set(10, -10, 10);
-    camera.up.set(0, 0, 1); // Z轴向上
+    // 俯视角：X 轴向上（屏幕上方），Y 轴向左（屏幕左方），Z 轴朝向观察者（屏幕外）
+    camera.position.set(0, 0, 50); // 从 Z 轴正方向看向原点
+    camera.up.set(1, 0, 0); // X 轴向上（屏幕上方）
+    camera.lookAt(0, 0, 0);
+    // 确保相机的旋转矩阵正确
+    camera.updateMatrix();
+    camera.updateMatrixWorld();
     cameraRef.current = camera;
 
     // 渲染器
@@ -75,10 +90,37 @@ export function PointCloudCanvas({
     containerRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
-    // 控制器 - 右手坐标系
+    // 控制器 - 右手坐标系，增强旋转功能
     const controls = new OrbitControls(camera, renderer.domElement);
+    
+    // 启用阻尼效果，使旋转更平滑
     controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
+    controls.dampingFactor = 0.08; // 增加阻尼系数，使旋转更平滑
+    
+    // 旋转设置
+    controls.rotateSpeed = 0.8; // 降低旋转速度，更精确控制
+    controls.enableRotate = true; // 启用旋转
+    
+    // 缩放设置
+    controls.enableZoom = true;
+    controls.zoomSpeed = 1.2; // 提高缩放速度
+    controls.minDistance = 1; // 最小缩放距离
+    controls.maxDistance = 10000; // 最大缩放距离
+    
+    // 平移设置
+    controls.enablePan = true;
+    controls.panSpeed = 0.8; // 平移速度
+    
+    // 旋转限制（可选）- 允许完整 360 度旋转
+    controls.minPolarAngle = 0; // 最小垂直角度
+    controls.maxPolarAngle = Math.PI; // 最大垂直角度（允许从下方查看）
+    controls.minAzimuthAngle = -Infinity; // 水平角度无限制
+    controls.maxAzimuthAngle = Infinity;
+    
+    // 自动旋转（默认关闭，可以通过UI控制）
+    controls.autoRotate = false;
+    controls.autoRotateSpeed = 2.0;
+    
     controlsRef.current = controls;
 
     // 添加坐标轴辅助
@@ -94,13 +136,24 @@ export function PointCloudCanvas({
     scene.add(annotationGroup);
     annotationGroupRef.current = annotationGroup;
 
-    // 动画循环
-    const animate = () => {
-      requestAnimationFrame(animate);
+    // 动画循环（带帧率控制）
+    let animationId: number;
+    const targetFPS = 60;
+    const frameInterval = 1000 / targetFPS;
+    let lastTime = 0;
+    
+    const animate = (time: number) => {
+      animationId = requestAnimationFrame(animate);
+      
+      // 帧率控制：限制渲染频率
+      const delta = time - lastTime;
+      if (delta < frameInterval) return;
+      lastTime = time - (delta % frameInterval);
+      
       controls.update();
       renderer.render(scene, camera);
     };
-    animate();
+    animate(0);
 
     // 响应式调整
     const handleResize = () => {
@@ -111,35 +164,76 @@ export function PointCloudCanvas({
     };
     window.addEventListener('resize', handleResize);
 
-    // 清理
+    // 清理函数
     return () => {
+      // 取消动画
+      if (animationId) {
+        cancelAnimationFrame(animationId);
+      }
+      
+      // 移除事件监听
       window.removeEventListener('resize', handleResize);
+      
+      // 清理 Three.js 资源
       if (containerRef.current && renderer.domElement) {
         containerRef.current.removeChild(renderer.domElement);
       }
+      
+      // 释放渲染器
       renderer.dispose();
+      
+      // 清理场景中的对象
+      scene.traverse((object) => {
+        if (object instanceof THREE.Mesh) {
+          object.geometry?.dispose();
+          if (object.material) {
+            if (Array.isArray(object.material)) {
+              object.material.forEach(m => m.dispose());
+            } else {
+              object.material.dispose();
+            }
+          }
+        } else if (object instanceof THREE.Points) {
+          object.geometry?.dispose();
+          if (object.material) {
+            object.material.dispose();
+          }
+        } else if (object instanceof THREE.Line) {
+          object.geometry?.dispose();
+          if (object.material) {
+            object.material.dispose();
+          }
+        }
+      });
+      
+      // 清空引用
+      scene.clear();
+      controls.dispose();
     };
   }, []);
 
   // 应用颜色模式
-  const applyColorMode = useCallback((mode: 'original' | 'intensity' | 'height') => {
+  const applyColorMode = useCallback((mode: 'none' | 'original' | 'intensity' | 'height') => {
     if (!pointCloudRef.current) return;
     
     const geometry = pointCloudRef.current.geometry;
     const attributes = geometry.attributes;
     const positionArray = attributes.position.array as Float32Array;
     
-    // 移除旧的颜色属性
+    // 移除颜色属性（默认白色）
     if (attributes.color) {
       geometry.deleteAttribute('color');
     }
     
-    if (mode === 'original' && attributes.color) {
+    if (mode === 'none') {
+      // 不着色，使用默认白色
+      console.log('不着色模式');
+    } else if (mode === 'original' && attributes.color) {
       // 如果有原始颜色，重新添加
       // 这里需要保存原始颜色，简化处理：重新加载
       console.log('使用原始颜色');
     } else if (mode === 'intensity' && attributes.intensity) {
-      // 使用 intensity 着色 - 提高对比度
+      // 使用 intensity 着色 - 使用彩色渐变（热力图风格）
       const intensityArray = attributes.intensity.array as Float32Array;
       const colors = new Float32Array(positionArray.length);
       
@@ -154,11 +248,35 @@ export function PointCloudCanvas({
       for (let i = 0; i < intensityArray.length; i++) {
         // 归一化到 0-1
         let normalized = (intensityArray[i] - minIntensity) / range;
-        // 应用 gamma 校正提高对比度 (gamma < 1 提高对比度)
-        normalized = Math.pow(normalized, 0.6);
-        colors[i * 3] = normalized;
-        colors[i * 3 + 1] = normalized;
-        colors[i * 3 + 2] = normalized;
+        // 应用 gamma 校正提高对比度
+        normalized = Math.pow(normalized, 0.7);
+        
+        // 使用彩色渐变：蓝 -> 青 -> 绿 -> 黄 -> 红
+        if (normalized < 0.25) {
+          // 蓝到青
+          const t = normalized / 0.25;
+          colors[i * 3] = 0;                    // R
+          colors[i * 3 + 1] = t;                // G
+          colors[i * 3 + 2] = 1;                // B
+        } else if (normalized < 0.5) {
+          // 青到绿
+          const t = (normalized - 0.25) / 0.25;
+          colors[i * 3] = 0;                    // R
+          colors[i * 3 + 1] = 1;                // G
+          colors[i * 3 + 2] = 1 - t;            // B
+        } else if (normalized < 0.75) {
+          // 绿到黄
+          const t = (normalized - 0.5) / 0.25;
+          colors[i * 3] = t;                    // R
+          colors[i * 3 + 1] = 1;                // G
+          colors[i * 3 + 2] = 0;                // B
+        } else {
+          // 黄到红
+          const t = (normalized - 0.75) / 0.25;
+          colors[i * 3] = 1;                    // R
+          colors[i * 3 + 1] = 1 - t;            // G
+          colors[i * 3 + 2] = 0;                // B
+        }
       }
       
       geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
@@ -247,14 +365,8 @@ export function PointCloudCanvas({
               setHasColor(hasColorAttr);
               setHasIntensity(hasIntensityAttr);
               
-              // 如果有 intensity 但没有 color，默认使用 intensity 着色
-              if (hasIntensityAttr && !hasColorAttr) {
-                setColorMode('intensity');
-              } else if (hasColorAttr) {
-                setColorMode('original');
-              } else {
-                setColorMode('height');
-              }
+              // 默认不着色，让用户自己选择
+              setColorMode('none');
               
               resolve(points);
             },
@@ -262,53 +374,15 @@ export function PointCloudCanvas({
             (error: unknown) => reject(error)
           );
         });
-      } else if (fileExt === 'json') {
-        // 加载 JSON 格式的点云数据
-        const response = await fetch(url);
-        const data: PointCloudData = await response.json();
-
-        // 创建点云几何体
-        const geometry = new THREE.BufferGeometry();
-        const positions = new Float32Array(data.points.length * 3);
-        const colors = new Float32Array(data.points.length * 3);
-
-        data.points.forEach((point, i) => {
-          positions[i * 3] = point[0];
-          positions[i * 3 + 1] = point[1];
-          positions[i * 3 + 2] = point[2];
-
-          // 如果有颜色数据，使用它；否则使用默认颜色
-          if (data.colors && data.colors[i]) {
-            colors[i * 3] = data.colors[i][0] / 255;
-            colors[i * 3 + 1] = data.colors[i][1] / 255;
-            colors[i * 3 + 2] = data.colors[i][2] / 255;
-          } else {
-            // 默认根据高度着色
-            const height = (point[1] + 10) / 20; // 假设 y 是高度
-            colors[i * 3] = 0.5 + height * 0.5;
-            colors[i * 3 + 1] = 0.5;
-            colors[i * 3 + 2] = 0.8 - height * 0.3;
-          }
-        });
-
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-        // 创建点云材质
-        const material = new THREE.PointsMaterial({
-          size: 0.1,
-          vertexColors: true,
-          sizeAttenuation: true,
-        });
-
-        pointCloud = new THREE.Points(geometry, material);
+      } else if (fileExt === 'ply' || fileExt === 'las') {
+        throw new Error(`暂不支持 ${fileExt.toUpperCase()} 格式，请使用 PCD 格式`);
       } else {
-        throw new Error(`不支持的文件格式: ${fileExt}`);
+        throw new Error(`不支持的文件格式: ${fileExt}，请使用 PCD 格式`);
       }
       sceneRef.current.add(pointCloud);
       pointCloudRef.current = pointCloud;
 
-      // 自动调整相机位置
+      // 自动调整相机位置 - 保持俯视角度
       const boundingBox = new THREE.Box3().setFromObject(pointCloud);
       const center = boundingBox.getCenter(new THREE.Vector3());
       const size = boundingBox.getSize(new THREE.Vector3());
@@ -324,8 +398,13 @@ export function PointCloudCanvas({
       let cameraZ = maxDim / (2 * Math.tan(fov / 2));
       cameraZ *= 2.0; // 增加距离以便更好地查看
 
-      cameraRef.current!.position.set(center.x + cameraZ, center.y + cameraZ / 2, center.z + cameraZ);
+      // 保持俯视角：X 轴向上，Y 轴向左，Z 轴朝向观察者
+      cameraRef.current!.position.set(center.x, center.y, center.z + cameraZ);
+      cameraRef.current!.up.set(1, 0, 0); // X 轴向上
       cameraRef.current!.lookAt(center);
+      // 确保相机矩阵更新
+      cameraRef.current!.updateMatrix();
+      cameraRef.current!.updateMatrixWorld();
       controlsRef.current!.target.copy(center);
       controlsRef.current!.update();
 
@@ -345,6 +424,150 @@ export function PointCloudCanvas({
       loadPointCloud(pointCloudUrl);
     }
   }, [pointCloudUrl, loadPointCloud]);
+
+  // 处理应用变换
+  const handleApplyTransform = () => {
+    try {
+      let allValues: number[] = [];
+      
+      // 尝试解析为嵌套数组格式 [[...], [...], [...], [...]]
+      const trimmed = matrixInput.trim();
+      if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (Array.isArray(parsed) && parsed.length === 4) {
+            // 展平 4x4 数组
+            allValues = parsed.flat();
+          }
+        } catch {
+          // 如果 JSON 解析失败，继续尝试其他格式
+        }
+      }
+      
+      // 如果不是嵌套数组格式，按多行/逗号解析
+      if (allValues.length === 0) {
+        allValues = matrixInput
+          .split(/[\n,]+/)  // 按换行符或逗号分割
+          .map(v => v.trim())
+          .filter(v => v !== '')
+          .map(v => parseFloat(v));
+      }
+      
+      if (allValues.length !== 16 || allValues.some(isNaN)) {
+        alert('请输入 16 个数字（4x4 矩阵）');
+        return;
+      }
+      
+      // 记录变换前的中心点
+      if (pointCloudRef.current) {
+        const boundingBox = new THREE.Box3().setFromObject(pointCloudRef.current);
+        const center = boundingBox.getCenter(new THREE.Vector3());
+        const beforeCenter: [number, number, number] = [center.x, center.y, center.z];
+        
+        // 从变换矩阵中提取平移量
+        const translation: [number, number, number] = [allValues[3], allValues[7], allValues[11]];
+        
+        // 应用变换
+        onTransformApply?.(allValues);
+        
+        // 计算理论上的变换后中心点
+        const afterCenter: [number, number, number] = [
+          beforeCenter[0] + translation[0],
+          beforeCenter[1] + translation[1],
+          beforeCenter[2] + translation[2]
+        ];
+        
+        setTransformInfo({
+          before: beforeCenter,
+          after: afterCenter,
+          offset: translation
+        });
+      } else {
+        onTransformApply?.(allValues);
+      }
+    } catch (error) {
+      alert('变换矩阵格式错误');
+    }
+  };
+
+  // 处理重置变换
+  const handleResetTransform = () => {
+    setMatrixInput(`[[1, 0, 0, 0],
+ [0, 1, 0, 0],
+ [0, 0, 1, 0],
+ [0, 0, 0, 1]]`);
+    setTransformInfo(null);
+    onTransformReset?.();
+  };
+
+  // 应用变换矩阵
+  useEffect(() => {
+    console.log('变换矩阵 useEffect:', { 
+      hasPointCloud: !!pointCloudRef.current, 
+      transformMatrix 
+    });
+    
+    if (!pointCloudRef.current || !transformMatrix) {
+      console.log('跳过变换：', {
+        hasPointCloud: !!pointCloudRef.current,
+        hasTransformMatrix: !!transformMatrix
+      });
+      return;
+    }
+
+    const geometry = pointCloudRef.current.geometry;
+    const positions = geometry.attributes.position.array as Float32Array;
+    
+    // 保存原始位置（如果没有保存过）
+    if (!(geometry as any).__originalPositions) {
+      console.log('保存原始位置');
+      (geometry as any).__originalPositions = new Float32Array(positions);
+    }
+    
+    const originalPositions = (geometry as any).__originalPositions as Float32Array;
+    
+    console.log('开始应用变换矩阵...', {
+      pointCount: positions.length / 3,
+      matrix: transformMatrix
+    });
+    
+    // 应用 4x4 变换矩阵
+    for (let i = 0; i < positions.length; i += 3) {
+      const x = originalPositions[i];
+      const y = originalPositions[i + 1];
+      const z = originalPositions[i + 2];
+      
+      // 矩阵变换: [x', y', z', 1] = M * [x, y, z, 1]
+      positions[i] = transformMatrix[0] * x + transformMatrix[1] * y + transformMatrix[2] * z + transformMatrix[3];
+      positions[i + 1] = transformMatrix[4] * x + transformMatrix[5] * y + transformMatrix[6] * z + transformMatrix[7];
+      positions[i + 2] = transformMatrix[8] * x + transformMatrix[9] * y + transformMatrix[10] * z + transformMatrix[11];
+    }
+    
+    geometry.attributes.position.needsUpdate = true;
+    
+    // 重新计算包围球
+    geometry.computeBoundingSphere();
+    
+    // 重新调整相机视角以适应变换后的点云
+    const boundingBox = new THREE.Box3().setFromObject(pointCloudRef.current);
+    const center = boundingBox.getCenter(new THREE.Vector3());
+    const size = boundingBox.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const fov = cameraRef.current!.fov * (Math.PI / 180);
+    let cameraZ = maxDim / (2 * Math.tan(fov / 2));
+    cameraZ *= 2.0;
+    
+    // 保持俯视角
+    cameraRef.current!.position.set(center.x, center.y, center.z + cameraZ);
+    cameraRef.current!.up.set(1, 0, 0);
+    cameraRef.current!.lookAt(center);
+    cameraRef.current!.updateMatrix();
+    cameraRef.current!.updateMatrixWorld();
+    controlsRef.current!.target.copy(center);
+    controlsRef.current!.update();
+    
+    console.log('变换完成！');
+  }, [transformMatrix]);
 
   // 绘制 3D 边界框
   const drawBBox3D = useCallback((annotation: BBox3DAnnotation) => {
@@ -572,7 +795,7 @@ export function PointCloudCanvas({
     if (files.length > 0 && onPointCloudDrop) {
       const file = files[0];
       const ext = file.name.split('.').pop()?.toLowerCase();
-      if (['json', 'pcd', 'ply', 'las', 'laz'].includes(ext || '')) {
+      if (['pcd', 'ply', 'las', 'laz'].includes(ext || '')) {
         onPointCloudDrop(file);
       }
     }
@@ -626,7 +849,7 @@ export function PointCloudCanvas({
               />
             </svg>
             <p className="mt-2 text-sm">拖放点云文件到此处</p>
-            <p className="mt-1 text-xs text-gray-500">支持 JSON, PCD, PLY, LAS 格式</p>
+            <p className="mt-1 text-xs text-gray-500">支持 PCD 格式（PLY、LAS 即将支持）</p>
           </div>
         </div>
       )}
@@ -644,6 +867,18 @@ export function PointCloudCanvas({
         <div className="absolute top-4 right-4 bg-black/70 text-white px-3 py-2 rounded-lg text-xs backdrop-blur-sm">
           <p className="mb-2 font-medium">着色模式</p>
           <div className="flex flex-col gap-1">
+            <button
+              onClick={() => {
+                setColorMode('none');
+                applyColorMode('none');
+              }}
+              className={cn(
+                "px-2 py-1 rounded transition-colors text-left",
+                colorMode === 'none' ? "bg-primary text-primary-foreground" : "bg-white/10 hover:bg-white/20"
+              )}
+            >
+              ⚪ 不着色
+            </button>
             <button
               onClick={() => {
                 setColorMode('original');
@@ -684,6 +919,142 @@ export function PointCloudCanvas({
             >
               📏 高度 (Z轴)
             </button>
+          </div>
+          
+          {/* 变换按钮 */}
+          <div className="mt-3 pt-3 border-t border-white/20">
+            <button
+              onClick={() => setShowTransformPanel(!showTransformPanel)}
+              className={cn(
+                "w-full px-2 py-1.5 rounded transition-colors text-left flex items-center gap-2",
+                showTransformPanel ? "bg-primary text-primary-foreground" : "bg-white/10 hover:bg-white/20"
+              )}
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+              </svg>
+              <span>坐标变换</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 变换面板 */}
+      {showTransformPanel && pointCloudUrl && (
+        <div className="absolute top-4 left-4 bg-black/90 text-white p-4 rounded-lg text-xs backdrop-blur-sm w-80 max-h-[calc(100vh-2rem)] overflow-y-auto">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-medium">4x4 变换矩阵</h3>
+            <button
+              onClick={() => setShowTransformPanel(false)}
+              className="text-gray-400 hover:text-white"
+            >
+              ✕
+            </button>
+          </div>
+          
+          <textarea
+            value={matrixInput}
+            onChange={(e) => setMatrixInput(e.target.value)}
+            className="w-full h-28 p-2 text-xs font-mono bg-gray-800 border border-gray-600 rounded resize-none focus:outline-none focus:border-primary"
+            placeholder={`[[1, 0, 0, 0],
+ [0, 1, 0, 0],
+ [0, 0, 1, 0],
+ [0, 0, 0, 1]]`}
+          />
+          
+          <div className="flex gap-2 mt-3">
+            <button
+              onClick={handleApplyTransform}
+              className="flex-1 px-3 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors"
+            >
+              应用变换
+            </button>
+            <button
+              onClick={handleResetTransform}
+              className="px-3 py-2 bg-gray-700 text-gray-300 rounded hover:bg-gray-600 transition-colors"
+            >
+              重置
+            </button>
+          </div>
+
+          {/* 变换验证信息 */}
+          {transformInfo && (
+            <div className="mt-3 p-3 bg-green-900/30 border border-green-700 rounded space-y-2">
+              <p className="text-green-300 font-medium">✓ 变换验证</p>
+              <div className="space-y-1 text-[10px] font-mono">
+                <div className="flex justify-between">
+                  <span className="text-gray-400">变换前:</span>
+                  <span className="text-green-300">
+                    ({transformInfo.before[0].toFixed(2)}, {transformInfo.before[1].toFixed(2)}, {transformInfo.before[2].toFixed(2)})
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">变换后:</span>
+                  <span className="text-green-300">
+                    ({transformInfo.after[0].toFixed(2)}, {transformInfo.after[1].toFixed(2)}, {transformInfo.after[2].toFixed(2)})
+                  </span>
+                </div>
+                <div className="flex justify-between border-t border-green-700 pt-1">
+                  <span className="text-gray-400">偏移量:</span>
+                  <span className="text-yellow-300">
+                    ({transformInfo.offset[0].toFixed(2)}, {transformInfo.offset[1].toFixed(2)}, {transformInfo.offset[2].toFixed(2)})
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="mt-4 pt-3 border-t border-gray-700">
+            <h4 className="text-gray-400 mb-2">预设矩阵</h4>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => setMatrixInput(`[[1, 0, 0, 0],
+ [0, 1, 0, 0],
+ [0, 0, 1, 0],
+ [0, 0, 0, 1]]`)}
+                className="px-2 py-1.5 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 transition-colors text-left text-[10px]"
+              >
+                单位矩阵
+              </button>
+              <button
+                onClick={() => setMatrixInput(`[[0,-1, 0, 0],
+ [1, 0, 0, 0],
+ [0, 0, 1, 0],
+ [0, 0, 0, 1]]`)}
+                className="px-2 py-1.5 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 transition-colors text-left text-[10px]"
+              >
+                绕Z轴90°
+              </button>
+              <button
+                onClick={() => setMatrixInput(`[[1, 0, 0, 0],
+ [0, 0,-1, 0],
+ [0, 1, 0, 0],
+ [0, 0, 0, 1]]`)}
+                className="px-2 py-1.5 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 transition-colors text-left text-[10px]"
+              >
+                绕X轴90°
+              </button>
+              <button
+                onClick={() => setMatrixInput(`[[0, 0, 1, 0],
+ [0, 1, 0, 0],
+ [-1, 0, 0, 0],
+ [0, 0, 0, 1]]`)}
+                className="px-2 py-1.5 bg-gray-800 text-gray-300 rounded hover:bg-gray-700 transition-colors text-left text-[10px]"
+              >
+                绕Y轴90°
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-gray-700 text-gray-400">
+            <p className="font-medium text-gray-300 mb-2">矩阵格式：</p>
+            <pre className="bg-gray-800 p-2 rounded text-[10px] font-mono">
+{`[R00, R01, R02, Tx]
+[R10, R11, R12, Ty]
+[R20, R21, R22, Tz]
+[  0,   0,   0,  1]`}
+            </pre>
+            <p className="mt-2 text-[10px]">R = 旋转, T = 平移</p>
           </div>
         </div>
       )}
