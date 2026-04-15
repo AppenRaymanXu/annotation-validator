@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useCallback } from 'react';
+import { useRef, useEffect, useState, useCallback, memo } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { PCDLoader } from 'three/addons/loaders/PCDLoader.js';
@@ -12,6 +12,15 @@ import {
   Point3DAnnotation,
   getLabelColor 
 } from '@/types/annotation';
+import {
+  CAMERA_CONFIG,
+  CONTROLS_CONFIG,
+  ROTATION_CONFIG,
+  ANIMATION_CONFIG,
+  COLOR_MODES,
+  KEYBOARD_SHORTCUTS,
+  type ColorMode,
+} from '@/config/constants';
 
 interface PointCloudCanvasProps {
   pointCloudUrl: string | null;
@@ -24,8 +33,7 @@ interface PointCloudCanvasProps {
   onTransformReset?: () => void; // 重置变换回调
 }
 
-
-export function PointCloudCanvas({ 
+export const PointCloudCanvas = memo(function PointCloudCanvas({ 
   pointCloudUrl, 
   annotations, 
   hiddenIds, 
@@ -44,7 +52,7 @@ export function PointCloudCanvas({
   const annotationGroupRef = useRef<THREE.Group | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [colorMode, setColorMode] = useState<'none' | 'original' | 'intensity' | 'height'>('none');
+  const [colorMode, setColorMode] = useState<ColorMode>('none');
   const [hasIntensity, setHasIntensity] = useState(false);
   const [hasColor, setHasColor] = useState(false);
   const [showTransformPanel, setShowTransformPanel] = useState(false);
@@ -69,14 +77,22 @@ export function PointCloudCanvas({
 
     // 相机 - 右手坐标系：X向前，Y向左，Z向上
     const camera = new THREE.PerspectiveCamera(
-      75,
+      CAMERA_CONFIG.FOV,
       containerRef.current.clientWidth / containerRef.current.clientHeight,
-      0.1,
-      10000
+      CAMERA_CONFIG.NEAR,
+      CAMERA_CONFIG.FAR
     );
     // 俯视角：X 轴向上（屏幕上方），Y 轴向左（屏幕左方），Z 轴朝向观察者（屏幕外）
-    camera.position.set(0, 0, 50); // 从 Z 轴正方向看向原点
-    camera.up.set(1, 0, 0); // X 轴向上（屏幕上方）
+    camera.position.set(
+      CAMERA_CONFIG.DEFAULT_POSITION.x,
+      CAMERA_CONFIG.DEFAULT_POSITION.y,
+      CAMERA_CONFIG.DEFAULT_POSITION.z
+    );
+    camera.up.set(
+      CAMERA_CONFIG.DEFAULT_UP.x,
+      CAMERA_CONFIG.DEFAULT_UP.y,
+      CAMERA_CONFIG.DEFAULT_UP.z
+    );
     camera.lookAt(0, 0, 0);
     // 确保相机的旋转矩阵正确
     camera.updateMatrix();
@@ -95,33 +111,169 @@ export function PointCloudCanvas({
     
     // 启用阻尼效果，使旋转更平滑
     controls.enableDamping = true;
-    controls.dampingFactor = 0.08; // 增加阻尼系数，使旋转更平滑
+    controls.dampingFactor = CONTROLS_CONFIG.DAMPING_FACTOR;
     
-    // 旋转设置
-    controls.rotateSpeed = 0.8; // 降低旋转速度，更精确控制
-    controls.enableRotate = true; // 启用旋转
+    // 旋转设置 - 优化拖动体验
+    controls.rotateSpeed = CONTROLS_CONFIG.ROTATE_SPEED;
+    controls.enableRotate = true;
     
     // 缩放设置
     controls.enableZoom = true;
-    controls.zoomSpeed = 1.2; // 提高缩放速度
-    controls.minDistance = 1; // 最小缩放距离
-    controls.maxDistance = 10000; // 最大缩放距离
+    controls.zoomSpeed = CONTROLS_CONFIG.ZOOM_SPEED;
+    controls.minDistance = CONTROLS_CONFIG.MIN_DISTANCE;
+    controls.maxDistance = CONTROLS_CONFIG.MAX_DISTANCE;
     
-    // 平移设置
+    // 平移设置 - 优化拖动体验
     controls.enablePan = true;
-    controls.panSpeed = 0.8; // 平移速度
+    controls.panSpeed = CONTROLS_CONFIG.PAN_SPEED;
+    controls.keyPanSpeed = 10.0;
     
-    // 旋转限制（可选）- 允许完整 360 度旋转
-    controls.minPolarAngle = 0; // 最小垂直角度
-    controls.maxPolarAngle = Math.PI; // 最大垂直角度（允许从下方查看）
-    controls.minAzimuthAngle = -Infinity; // 水平角度无限制
+    // 旋转限制 - 允许完整 360 度旋转
+    controls.minPolarAngle = 0;
+    controls.maxPolarAngle = Math.PI;
+    controls.minAzimuthAngle = -Infinity;
     controls.maxAzimuthAngle = Infinity;
     
-    // 自动旋转（默认关闭，可以通过UI控制）
+    // 鼠标按钮配置 - 更符合直觉
+    controls.mouseButtons = {
+      LEFT: THREE.MOUSE.ROTATE,
+      MIDDLE: THREE.MOUSE.DOLLY,
+      RIGHT: THREE.MOUSE.PAN
+    };
+    
+    // 触摸配置 - 移动端友好
+    controls.touches = {
+      ONE: THREE.TOUCH.ROTATE,
+      TWO: THREE.TOUCH.DOLLY_PAN
+    };
+    
+    // 目标点设置
+    controls.target.set(0, 0, 0);
+    controls.update();
+    
+    // 自动旋转（默认关闭）
     controls.autoRotate = false;
     controls.autoRotateSpeed = 2.0;
     
     controlsRef.current = controls;
+
+    // Shift + 鼠标拖动 = 绕Z轴旋转（偏航角 Yaw）
+    let isYawRotating = false;
+    let lastYawMouseX = 0;
+    const yawRotationSpeed = ROTATION_CONFIG.YAW_SPEED;
+    
+    const handleYawMouseDown = (e: MouseEvent) => {
+      if (e.shiftKey && e.button === 0) {
+        isYawRotating = true;
+        lastYawMouseX = e.clientX;
+        // 禁用 OrbitControls
+        controls.enableRotate = false;
+        controls.enablePan = false;
+      }
+    };
+    
+    const handleYawMouseMove = (e: MouseEvent) => {
+      if (!isYawRotating) return;
+      
+      const deltaX = e.clientX - lastYawMouseX;
+      if (Math.abs(deltaX) < ROTATION_CONFIG.MIN_DELTA) return;
+      
+      // 计算旋转角度
+      const angle = -deltaX * yawRotationSpeed;
+      
+      // 获取相机到目标点的向量
+      const offset = new THREE.Vector3().subVectors(camera.position, controls.target);
+      
+      // 创建Z轴旋转的四元数（世界坐标系的Z轴）
+      const zAxis = new THREE.Vector3(0, 0, 1);
+      const quaternion = new THREE.Quaternion().setFromAxisAngle(zAxis, angle);
+      
+      // 旋转偏移向量
+      offset.applyQuaternion(quaternion);
+      
+      // 更新相机位置
+      camera.position.copy(controls.target).add(offset);
+      
+      // 更新相机的up向量
+      const up = camera.up.clone();
+      up.applyQuaternion(quaternion);
+      camera.up.copy(up);
+      
+      camera.lookAt(controls.target);
+      controls.update();
+      
+      lastYawMouseX = e.clientX;
+    };
+    
+    const handleYawMouseUp = () => {
+      if (isYawRotating) {
+        isYawRotating = false;
+        // 恢复 OrbitControls
+        controls.enableRotate = true;
+        controls.enablePan = true;
+      }
+    };
+    
+    if (containerRef.current) {
+      containerRef.current.addEventListener('mousedown', handleYawMouseDown, true);
+      containerRef.current.addEventListener('mousemove', handleYawMouseMove, true);
+      containerRef.current.addEventListener('mouseup', handleYawMouseUp, true);
+      containerRef.current.addEventListener('mouseleave', handleYawMouseUp, true);
+    }
+
+    // R键重置视角
+    const handleResetView = () => {
+      if (!pointCloudRef.current || !camera || !controls) return;
+      
+      // 重新计算点云边界框
+      const boundingBox = new THREE.Box3().setFromObject(pointCloudRef.current);
+      const center = boundingBox.getCenter(new THREE.Vector3());
+      const size = boundingBox.getSize(new THREE.Vector3());
+      
+      // 计算合适的相机距离
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const fov = camera.fov * (Math.PI / 180);
+      let cameraZ = maxDim / (2 * Math.tan(fov / 2));
+      cameraZ *= 2.0;
+      
+      // 平滑过渡到新视角
+      const startPos = camera.position.clone();
+      const startTarget = controls.target.clone();
+      const endPos = new THREE.Vector3(center.x, center.y, center.z + cameraZ);
+      const endTarget = center.clone();
+      
+      const duration = ANIMATION_CONFIG.RESET_DURATION; // ms 动画
+      const startTime = Date.now();
+      
+      const animateCamera = () => {
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        
+        // 缓动函数 (ease-in-out)
+        const ease = progress < 0.5 
+          ? 2 * progress * progress 
+          : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+        
+        camera.position.lerpVectors(startPos, endPos, ease);
+        controls.target.lerpVectors(startTarget, endTarget, ease);
+        controls.update();
+        
+        if (progress < 1) {
+          requestAnimationFrame(animateCamera);
+        }
+      };
+      
+      animateCamera();
+    };
+    
+    // R键监听
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === KEYBOARD_SHORTCUTS.RESET_VIEW) {
+        handleResetView();
+      }
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
 
     // 添加坐标轴辅助
     const axesHelper = new THREE.AxesHelper(50);
@@ -138,9 +290,14 @@ export function PointCloudCanvas({
 
     // 动画循环（带帧率控制）
     let animationId: number;
-    const targetFPS = 60;
-    const frameInterval = 1000 / targetFPS;
+    const frameInterval = 1000 / ANIMATION_CONFIG.FPS;
     let lastTime = 0;
+    let needsRender = true; // 标记是否需要渲染
+    
+    // 监听控制器变化，标记需要渲染
+    controls.addEventListener('change', () => {
+      needsRender = true;
+    });
     
     const animate = (time: number) => {
       animationId = requestAnimationFrame(animate);
@@ -150,8 +307,12 @@ export function PointCloudCanvas({
       if (delta < frameInterval) return;
       lastTime = time - (delta % frameInterval);
       
-      controls.update();
-      renderer.render(scene, camera);
+      // 只有在需要时才渲染
+      if (needsRender) {
+        controls.update();
+        renderer.render(scene, camera);
+        needsRender = false;
+      }
     };
     animate(0);
 
@@ -173,6 +334,13 @@ export function PointCloudCanvas({
       
       // 移除事件监听
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('keydown', handleKeyDown);
+      if (containerRef.current) {
+        containerRef.current.removeEventListener('mousedown', handleYawMouseDown, true);
+        containerRef.current.removeEventListener('mousemove', handleYawMouseMove, true);
+        containerRef.current.removeEventListener('mouseup', handleYawMouseUp, true);
+        containerRef.current.removeEventListener('mouseleave', handleYawMouseUp, true);
+      }
       
       // 清理 Three.js 资源
       if (containerRef.current && renderer.domElement) {
@@ -831,6 +999,30 @@ export function PointCloudCanvas({
         </div>
       )}
 
+      {/* 操作提示 */}
+      {pointCloudUrl && !isLoading && (
+        <div className="absolute bottom-4 right-4 z-10 bg-black/70 text-white p-3 rounded-lg text-xs backdrop-blur-sm pointer-events-none">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="font-medium">🖱️ 左键拖动</span>
+              <span className="text-gray-300">旋转</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="font-medium">🖱️ 右键拖动</span>
+              <span className="text-gray-300">平移</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="font-medium">🖱️ 滚轮</span>
+              <span className="text-gray-300">缩放</span>
+            </div>
+            <div className="flex items-center gap-2 border-t border-gray-600 pt-1 mt-1">
+              <span className="font-medium">👆 双击</span>
+              <span className="text-gray-300">重置视角</span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 空状态 */}
       {!pointCloudUrl && !isDragOver && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -856,9 +1048,33 @@ export function PointCloudCanvas({
 
       {/* 操作提示 */}
       {pointCloudUrl && (
-        <div className="absolute top-4 left-4 bg-black/70 text-white px-3 py-2 rounded-lg text-xs backdrop-blur-sm">
-          <p>🖱️ 左键旋转 | 右键平移 | 滚轮缩放</p>
-          <p className="mt-1 text-gray-300">坐标系：X向前(红) Y向左(绿) Z向上(蓝)</p>
+        <div className="absolute bottom-4 right-4 z-10 bg-black/70 text-white p-3 rounded-lg text-xs backdrop-blur-sm pointer-events-none">
+          <div className="space-y-1">
+            <div className="text-gray-400 font-medium mb-1">基础操作</div>
+            <div className="flex items-center gap-2">
+              <span className="font-medium">🖱️ 左键拖动</span>
+              <span className="text-gray-300">俯仰角 + 翻滚角</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="font-medium">🖱️ 右键拖动</span>
+              <span className="text-gray-300">平移</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="font-medium">🖱️ 滚轮</span>
+              <span className="text-gray-300">缩放</span>
+            </div>
+            <div className="border-t border-gray-600 my-1"></div>
+            <div className="text-gray-400 font-medium mb-1">组合键</div>
+            <div className="flex items-center gap-2">
+              <span className="font-medium">Shift + 左键拖动</span>
+              <span className="text-gray-300">偏航角旋转</span>
+            </div>
+            <div className="border-t border-gray-600 my-1"></div>
+            <div className="flex items-center gap-2">
+              <span className="font-medium">R 键</span>
+              <span className="text-gray-300">重置视角</span>
+            </div>
+          </div>
         </div>
       )}
 
@@ -869,24 +1085,24 @@ export function PointCloudCanvas({
           <div className="flex flex-col gap-1">
             <button
               onClick={() => {
-                setColorMode('none');
-                applyColorMode('none');
+                setColorMode(COLOR_MODES[0]);
+                applyColorMode(COLOR_MODES[0]);
               }}
               className={cn(
                 "px-2 py-1 rounded transition-colors text-left",
-                colorMode === 'none' ? "bg-primary text-primary-foreground" : "bg-white/10 hover:bg-white/20"
+                colorMode === COLOR_MODES[0] ? "bg-primary text-primary-foreground" : "bg-white/10 hover:bg-white/20"
               )}
             >
               ⚪ 不着色
             </button>
             <button
               onClick={() => {
-                setColorMode('original');
-                applyColorMode('original');
+                setColorMode(COLOR_MODES[1]);
+                applyColorMode(COLOR_MODES[1]);
               }}
               className={cn(
                 "px-2 py-1 rounded transition-colors text-left",
-                colorMode === 'original' ? "bg-primary text-primary-foreground" : "bg-white/10 hover:bg-white/20",
+                colorMode === COLOR_MODES[1] ? "bg-primary text-primary-foreground" : "bg-white/10 hover:bg-white/20",
                 !hasColor && "opacity-50 cursor-not-allowed"
               )}
               disabled={!hasColor}
@@ -895,12 +1111,12 @@ export function PointCloudCanvas({
             </button>
             <button
               onClick={() => {
-                setColorMode('intensity');
-                applyColorMode('intensity');
+                setColorMode(COLOR_MODES[2]);
+                applyColorMode(COLOR_MODES[2]);
               }}
               className={cn(
                 "px-2 py-1 rounded transition-colors text-left",
-                colorMode === 'intensity' ? "bg-primary text-primary-foreground" : "bg-white/10 hover:bg-white/20",
+                colorMode === COLOR_MODES[2] ? "bg-primary text-primary-foreground" : "bg-white/10 hover:bg-white/20",
                 !hasIntensity && "opacity-50 cursor-not-allowed"
               )}
               disabled={!hasIntensity}
@@ -909,12 +1125,12 @@ export function PointCloudCanvas({
             </button>
             <button
               onClick={() => {
-                setColorMode('height');
-                applyColorMode('height');
+                setColorMode(COLOR_MODES[3]);
+                applyColorMode(COLOR_MODES[3]);
               }}
               className={cn(
                 "px-2 py-1 rounded transition-colors text-left",
-                colorMode === 'height' ? "bg-primary text-primary-foreground" : "bg-white/10 hover:bg-white/20"
+                colorMode === COLOR_MODES[3] ? "bg-primary text-primary-foreground" : "bg-white/10 hover:bg-white/20"
               )}
             >
               📏 高度 (Z轴)
@@ -1060,4 +1276,4 @@ export function PointCloudCanvas({
       )}
     </div>
   );
-}
+});

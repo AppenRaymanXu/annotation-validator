@@ -1,4 +1,7 @@
-// 标注类型枚举
+/**
+ * 标注类型枚举
+ * 支持2D和3D标注类型
+ */
 export enum AnnotationType {
   BBOX = 'bbox',           // 矩形框
   POLYGON = 'polygon',     // 多边形
@@ -11,7 +14,9 @@ export enum AnnotationType {
   POINT_3D = 'point_3d',   // 3D点
 }
 
-// 坐标点
+/**
+ * 2D坐标点
+ */
 export interface Point {
   x: number;
   y: number;
@@ -70,7 +75,9 @@ export interface Point3D {
   z: number;
 }
 
-// 3D边界框标注
+/**
+ * 3D边界框标注
+ */
 export interface BBox3DAnnotation {
   id: string;
   type: AnnotationType.BBOX_3D;
