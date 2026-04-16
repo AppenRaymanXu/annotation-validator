@@ -50,6 +50,7 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
   const controlsRef = useRef<OrbitControls | null>(null);
   const pointCloudRef = useRef<THREE.Points | null>(null);
   const annotationGroupRef = useRef<THREE.Group | null>(null);
+  const needsRenderRef = useRef<boolean>(true); // 按需渲染标记
   const [isDragOver, setIsDragOver] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [colorMode, setColorMode] = useState<ColorMode>('none');
@@ -292,11 +293,10 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
     let animationId: number;
     const frameInterval = 1000 / ANIMATION_CONFIG.FPS;
     let lastTime = 0;
-    let needsRender = true; // 标记是否需要渲染
     
     // 监听控制器变化，标记需要渲染
     controls.addEventListener('change', () => {
-      needsRender = true;
+      needsRenderRef.current = true;
     });
     
     const animate = (time: number) => {
@@ -308,10 +308,10 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
       lastTime = time - (delta % frameInterval);
       
       // 只有在需要时才渲染
-      if (needsRender) {
+      if (needsRenderRef.current) {
         controls.update();
         renderer.render(scene, camera);
-        needsRender = false;
+        needsRenderRef.current = false;
       }
     };
     animate(0);
@@ -383,108 +383,89 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
   // 应用颜色模式
   const applyColorMode = useCallback((mode: 'none' | 'original' | 'intensity' | 'height') => {
     if (!pointCloudRef.current) return;
-    
+      
     const geometry = pointCloudRef.current.geometry;
-    const attributes = geometry.attributes;
-    const positionArray = attributes.position.array as Float32Array;
-    
-    // 移除颜色属性（默认白色）
-    if (attributes.color) {
+    const positionArray = geometry.attributes.position.array as Float32Array;
+      
+    // 先移除旧的 color 属性
+    if (geometry.hasAttribute('color')) {
       geometry.deleteAttribute('color');
     }
-    
-    if (mode === 'none') {
-      // 不着色，使用默认白色
-      console.log('不着色模式');
-    } else if (mode === 'original' && attributes.color) {
-      // 如果有原始颜色，重新添加
-      // 这里需要保存原始颜色，简化处理：重新加载
-      console.log('使用原始颜色');
-    } else if (mode === 'intensity' && attributes.intensity) {
-      // 使用 intensity 着色 - 使用彩色渐变（热力图风格）
-      const intensityArray = attributes.intensity.array as Float32Array;
-      const colors = new Float32Array(positionArray.length);
       
+    if (mode === 'none') {
+      // 不着色，什么都不做
+    } else if (mode === 'original') {
+      // 原始颜色：已在加载时处理，此处暂不支持
+    } else if (mode === 'intensity') {
+      // 使用 intensity 着色 - 使用彩色渐变（热力图风格）
+      const intensityAttr = geometry.attributes.intensity;
+      if (!intensityAttr) return;
+      const intensityArray = intensityAttr.array as Float32Array;
+      const colors = new Float32Array(positionArray.length);
+        
       let minIntensity = Infinity;
       let maxIntensity = -Infinity;
       for (let i = 0; i < intensityArray.length; i++) {
         minIntensity = Math.min(minIntensity, intensityArray[i]);
         maxIntensity = Math.max(maxIntensity, intensityArray[i]);
       }
-      
+        
       const range = maxIntensity - minIntensity || 1;
       for (let i = 0; i < intensityArray.length; i++) {
-        // 归一化到 0-1
         let normalized = (intensityArray[i] - minIntensity) / range;
-        // 应用 gamma 校正提高对比度
         normalized = Math.pow(normalized, 0.7);
-        
-        // 使用彩色渐变：蓝 -> 青 -> 绿 -> 黄 -> 红
+          
         if (normalized < 0.25) {
-          // 蓝到青
           const t = normalized / 0.25;
-          colors[i * 3] = 0;                    // R
-          colors[i * 3 + 1] = t;                // G
-          colors[i * 3 + 2] = 1;                // B
+          colors[i * 3] = 0; colors[i * 3 + 1] = t; colors[i * 3 + 2] = 1;
         } else if (normalized < 0.5) {
-          // 青到绿
           const t = (normalized - 0.25) / 0.25;
-          colors[i * 3] = 0;                    // R
-          colors[i * 3 + 1] = 1;                // G
-          colors[i * 3 + 2] = 1 - t;            // B
+          colors[i * 3] = 0; colors[i * 3 + 1] = 1; colors[i * 3 + 2] = 1 - t;
         } else if (normalized < 0.75) {
-          // 绿到黄
           const t = (normalized - 0.5) / 0.25;
-          colors[i * 3] = t;                    // R
-          colors[i * 3 + 1] = 1;                // G
-          colors[i * 3 + 2] = 0;                // B
+          colors[i * 3] = t; colors[i * 3 + 1] = 1; colors[i * 3 + 2] = 0;
         } else {
-          // 黄到红
           const t = (normalized - 0.75) / 0.25;
-          colors[i * 3] = 1;                    // R
-          colors[i * 3 + 1] = 1 - t;            // G
-          colors[i * 3 + 2] = 0;                // B
+          colors[i * 3] = 1; colors[i * 3 + 1] = 1 - t; colors[i * 3 + 2] = 0;
         }
       }
-      
       geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     } else if (mode === 'height') {
-      // 使用高度（Z 轴）着色 - 提高对比度
+      // 使用高度（Z 轴）着色
       const colors = new Float32Array(positionArray.length);
-      
+        
       let minZ = Infinity;
       let maxZ = -Infinity;
       for (let i = 0; i < positionArray.length; i += 3) {
         minZ = Math.min(minZ, positionArray[i + 2]);
         maxZ = Math.max(maxZ, positionArray[i + 2]);
       }
-      
+        
       const range = maxZ - minZ || 1;
       for (let i = 0; i < positionArray.length; i += 3) {
-        // 归一化到 0-1
         let normalized = (positionArray[i + 2] - minZ) / range;
-        // 应用 gamma 校正提高对比度
         normalized = Math.pow(normalized, 0.7);
-        // 使用更鲜明的渐变色（蓝-青-绿-黄-红）
-        colors[i] = Math.pow(normalized, 0.8);         // R - 增强高值
-        colors[i + 1] = 0.3 + normalized * 0.7;        // G - 中间值更亮
-        colors[i + 2] = Math.pow(1 - normalized, 0.8); // B - 增强低值
+        colors[i] = Math.pow(normalized, 0.8);
+        colors[i + 1] = 0.3 + normalized * 0.7;
+        colors[i + 2] = Math.pow(1 - normalized, 0.8);
       }
-      
       geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     }
-    
+      
     // 更新材质
     const material = pointCloudRef.current.material as THREE.PointsMaterial;
-    material.vertexColors = mode !== 'original' || hasColor;
-    material.needsUpdate = true;
-    
-    // 更新颜色属性
-    const colorAttribute = geometry.attributes.color;
-    if (colorAttribute) {
-      colorAttribute.needsUpdate = true;
+    if (mode === 'none') {
+      material.vertexColors = false;
+      material.color.set(0xffffff);
+    } else {
+      material.vertexColors = true;
+      material.color.set(0xffffff);
     }
-  }, [hasColor]);
+    material.needsUpdate = true;
+      
+    // 标记需要重新渲染
+    needsRenderRef.current = true;
+  }, []);
 
   // 加载点云数据
   const loadPointCloud = useCallback(async (url: string) => {
