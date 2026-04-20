@@ -76,6 +76,13 @@ export function Canvas({ imageUrl, annotations, hiddenIds, onImageDrop, classNam
       setViewState({ scale: 1, offsetX: 0, offsetY: 0 });
     };
     img.src = imageUrl;
+
+    // 组件卸载时释放 ObjectURL
+    return () => {
+      if (imageUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(imageUrl);
+      }
+    };
   }, [imageUrl]);
 
   // 绘制画布

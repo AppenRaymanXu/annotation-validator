@@ -3,6 +3,10 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { PCDLoader } from 'three/addons/loaders/PCDLoader.js';
 import { cn } from '@/lib/utils';
+
+// 生产环境静默的调试日志
+const DEBUG = import.meta.env.DEV;
+const debugLog = (...args: unknown[]) => { if (DEBUG) console.log('[PointCloud]', ...args); };
 import { 
   Annotation, 
   AnnotationType,
@@ -10,17 +14,35 @@ import {
   Polygon3DAnnotation, 
   Polyline3DAnnotation,
   Point3DAnnotation,
-  getLabelColor 
 } from '@/types/annotation';
 import {
   CAMERA_CONFIG,
   CONTROLS_CONFIG,
+  CONTROLS_EXTENDED_CONFIG,
+  SCENE_CONFIG,
+  GAMMA_CONFIG,
+  DEFAULT_IDENTITY_MATRIX,
+  COLOR_VALUES,
   ROTATION_CONFIG,
   ANIMATION_CONFIG,
   COLOR_MODES,
+  RGBA_ORDER_MAP,
   KEYBOARD_SHORTCUTS,
   type ColorMode,
+  type RGBAOrder,
+  type RGBOrder,
 } from '@/config/constants';
+import {
+  decompressLZF,
+  drawBBox3D,
+  drawPolygon3D,
+  drawPolyline3D,
+  drawPoint3D,
+  clearLabelTextureCache,
+  disposeObject3D,
+  applyColorMode as applyColorModeUtil,
+  applyRGBAOrder as applyRGBAOrderUtil,
+} from './pointcloud';
 
 interface PointCloudCanvasProps {
   pointCloudUrl: string | null;
@@ -31,6 +53,7 @@ interface PointCloudCanvasProps {
   transformMatrix?: number[] | null; // 4x4 变换矩阵
   onTransformApply?: (matrix: number[]) => void; // 应用变换回调
   onTransformReset?: () => void; // 重置变换回调
+  pointCloudFileName?: string; // 点云文件名（替代 window 全局变量）
 }
 
 export const PointCloudCanvas = memo(function PointCloudCanvas({ 
@@ -41,7 +64,8 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
   className,
   transformMatrix = null,
   onTransformApply,
-  onTransformReset
+  onTransformReset,
+  pointCloudFileName = '',
 }: PointCloudCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -50,20 +74,23 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
   const controlsRef = useRef<OrbitControls | null>(null);
   const pointCloudRef = useRef<THREE.Points | null>(null);
   const annotationGroupRef = useRef<THREE.Group | null>(null);
+  const axesHelperRef = useRef<THREE.AxesHelper | null>(null); // 坐标轴辅助
   const needsRenderRef = useRef<boolean>(true); // 按需渲染标记
   const originalColorsRef = useRef<Float32Array | null>(null); // 保存原始颜色数据
+  const originalRGBARef = useRef<Uint32Array | null>(null); // 保存原始 rgba 数据（用于通道切换）
   const annotationPoolRef = useRef<Map<string, THREE.Object3D[]>>(new Map()); // 标注对象池
-  const labelTextureCacheRef = useRef<Map<string, THREE.CanvasTexture>>(new Map()); // 标签纹理缓存
   const [isDragOver, setIsDragOver] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [colorMode, setColorMode] = useState<ColorMode>('none');
+  const colorModeRef = useRef<ColorMode>('none');
   const [hasIntensity, setHasIntensity] = useState(false);
   const [hasColor, setHasColor] = useState(false);
+  const [rgbaOrder, setRgbaOrder] = useState<RGBAOrder | RGBOrder>('rgba'); // 颜色通道顺序
+  const [colorGamma, setColorGamma] = useState<number>(GAMMA_CONFIG.DEFAULT); // 颜色 Gamma 值（<1 更鲜艳）
   const [showTransformPanel, setShowTransformPanel] = useState(false);
-  const [matrixInput, setMatrixInput] = useState(`[[1, 0, 0, 0],
- [0, 1, 0, 0],
- [0, 0, 1, 0],
- [0, 0, 0, 1]]`);
+  const [detectedColorFormat, setDetectedColorFormat] = useState<'rgba' | 'rgb' | 'separate' | null>(null); // 检测到的颜色格式
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [matrixInput, setMatrixInput] = useState(DEFAULT_IDENTITY_MATRIX);
   const [transformInfo, setTransformInfo] = useState<{ 
     before: [number, number, number]; 
     after: [number, number, number];
@@ -76,7 +103,7 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
 
     // 场景
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x1a1a1a);
+    scene.background = new THREE.Color(SCENE_CONFIG.BACKGROUND_COLOR);
     sceneRef.current = scene;
 
     // 相机 - 右手坐标系：X向前，Y向左，Z向上
@@ -130,7 +157,7 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
     // 平移设置 - 优化拖动体验
     controls.enablePan = true;
     controls.panSpeed = CONTROLS_CONFIG.PAN_SPEED;
-    controls.keyPanSpeed = 10.0;
+    controls.keyPanSpeed = CONTROLS_EXTENDED_CONFIG.KEY_PAN_SPEED;
     
     // 旋转限制 - 允许完整 360 度旋转
     controls.minPolarAngle = 0;
@@ -157,7 +184,7 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
     
     // 自动旋转（默认关闭）
     controls.autoRotate = false;
-    controls.autoRotateSpeed = 2.0;
+    controls.autoRotateSpeed = CONTROLS_EXTENDED_CONFIG.AUTO_ROTATE_SPEED;
     
     controlsRef.current = controls;
 
@@ -238,7 +265,7 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
       const maxDim = Math.max(size.x, size.y, size.z);
       const fov = camera.fov * (Math.PI / 180);
       let cameraZ = maxDim / (2 * Math.tan(fov / 2));
-      cameraZ *= 2.0;
+      cameraZ *= SCENE_CONFIG.CAMERA_DISTANCE_MULTIPLIER;
       
       // 平滑过渡到新视角
       const startPos = camera.position.clone();
@@ -280,8 +307,9 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
     window.addEventListener('keydown', handleKeyDown);
 
     // 添加坐标轴辅助
-    const axesHelper = new THREE.AxesHelper(50);
+    const axesHelper = new THREE.AxesHelper(SCENE_CONFIG.AXES_HELPER_SIZE);
     scene.add(axesHelper);
+    axesHelperRef.current = axesHelper;
 
     // 不添加网格辅助（去掉棋盘格）
     // const gridHelper = new THREE.GridHelper(100, 100);
@@ -320,14 +348,27 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
     };
     animate(0);
 
-    // 响应式调整
+    // 响应式调整（带防抖）
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
     const handleResize = () => {
-      if (!containerRef.current || !camera || !renderer) return;
-      camera.aspect = containerRef.current.clientWidth / containerRef.current.clientHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (!containerRef.current || !camera || !renderer) return;
+        camera.aspect = containerRef.current.clientWidth / containerRef.current.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
+        needsRenderRef.current = true;
+      }, 100);
     };
     window.addEventListener('resize', handleResize);
+    
+    // 使用 ResizeObserver 监听容器尺寸变化（如 JSON 编辑器收起/展开）
+    const resizeObserver = new ResizeObserver(() => {
+      handleResize();
+    });
+    if (containerRef.current) {
+      resizeObserver.observe(containerRef.current);
+    }
 
     // 清理函数
     return () => {
@@ -340,6 +381,8 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
       controls.removeEventListener('change', onControlsChange);
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('keydown', handleKeyDown);
+      resizeObserver.disconnect();
+      if (resizeTimer) clearTimeout(resizeTimer);
       if (containerRef.current) {
         containerRef.current.removeEventListener('mousedown', handleYawMouseDown, true);
         containerRef.current.removeEventListener('mousemove', handleYawMouseMove, true);
@@ -384,105 +427,32 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
       controls.dispose();
       
       // 清理纹理缓存
-      labelTextureCacheRef.current.forEach(texture => texture.dispose());
-      labelTextureCacheRef.current.clear();
+      clearLabelTextureCache();
       
       // 清理对象池
       annotationPoolRef.current.clear();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 应用颜色通道顺序（不重新加载文件）
+  const applyRGBAOrder = useCallback((order: RGBAOrder | RGBOrder, gamma: number = 1.0) => {
+    if (!pointCloudRef.current || !originalRGBARef.current) return;
+    applyRGBAOrderUtil(
+      pointCloudRef.current,
+      originalRGBARef.current,
+      order,
+      gamma,
+      originalColorsRef,
+      needsRenderRef,
+      (mode) => applyColorMode(mode)
+    );
   }, []);
 
   // 应用颜色模式
-  const applyColorMode = useCallback((mode: 'none' | 'original' | 'intensity' | 'height') => {
+  const applyColorMode = useCallback((mode: ColorMode) => {
     if (!pointCloudRef.current) return;
-      
-    const geometry = pointCloudRef.current.geometry;
-    const positionArray = geometry.attributes.position.array as Float32Array;
-      
-    // 先移除旧的 color 属性（除了 original 模式）
-    if (mode !== 'original' && geometry.hasAttribute('color')) {
-      geometry.deleteAttribute('color');
-    }
-      
-    if (mode === 'none') {
-      // 不着色，什么都不做
-    } else if (mode === 'original') {
-      // 原始颜色：使用 ref 中保存的原始颜色
-      if (!originalColorsRef.current) {
-        console.warn('没有原始颜色数据');
-        return;
-      }
-      // 重新设置 color 属性
-      geometry.setAttribute('color', new THREE.BufferAttribute(originalColorsRef.current, 3));
-    } else if (mode === 'intensity') {
-      // 使用 intensity 着色 - 使用彩色渐变（热力图风格）
-      const intensityAttr = geometry.attributes.intensity;
-      if (!intensityAttr) return;
-      const intensityArray = intensityAttr.array as Float32Array;
-      const colors = new Float32Array(positionArray.length);
-        
-      let minIntensity = Infinity;
-      let maxIntensity = -Infinity;
-      for (let i = 0; i < intensityArray.length; i++) {
-        minIntensity = Math.min(minIntensity, intensityArray[i]);
-        maxIntensity = Math.max(maxIntensity, intensityArray[i]);
-      }
-        
-      const range = maxIntensity - minIntensity || 1;
-      for (let i = 0; i < intensityArray.length; i++) {
-        let normalized = (intensityArray[i] - minIntensity) / range;
-        normalized = Math.pow(normalized, 0.7);
-          
-        if (normalized < 0.25) {
-          const t = normalized / 0.25;
-          colors[i * 3] = 0; colors[i * 3 + 1] = t; colors[i * 3 + 2] = 1;
-        } else if (normalized < 0.5) {
-          const t = (normalized - 0.25) / 0.25;
-          colors[i * 3] = 0; colors[i * 3 + 1] = 1; colors[i * 3 + 2] = 1 - t;
-        } else if (normalized < 0.75) {
-          const t = (normalized - 0.5) / 0.25;
-          colors[i * 3] = t; colors[i * 3 + 1] = 1; colors[i * 3 + 2] = 0;
-        } else {
-          const t = (normalized - 0.75) / 0.25;
-          colors[i * 3] = 1; colors[i * 3 + 1] = 1 - t; colors[i * 3 + 2] = 0;
-        }
-      }
-      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    } else if (mode === 'height') {
-      // 使用高度（Z 轴）着色
-      const colors = new Float32Array(positionArray.length);
-        
-      let minZ = Infinity;
-      let maxZ = -Infinity;
-      for (let i = 0; i < positionArray.length; i += 3) {
-        minZ = Math.min(minZ, positionArray[i + 2]);
-        maxZ = Math.max(maxZ, positionArray[i + 2]);
-      }
-        
-      const range = maxZ - minZ || 1;
-      for (let i = 0; i < positionArray.length; i += 3) {
-        let normalized = (positionArray[i + 2] - minZ) / range;
-        normalized = Math.pow(normalized, 0.7);
-        colors[i] = Math.pow(normalized, 0.8);
-        colors[i + 1] = 0.3 + normalized * 0.7;
-        colors[i + 2] = Math.pow(1 - normalized, 0.8);
-      }
-      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    }
-      
-    // 更新材质
-    const material = pointCloudRef.current.material as THREE.PointsMaterial;
-    if (mode === 'none') {
-      material.vertexColors = false;
-      material.color.set(0xffffff);
-    } else {
-      material.vertexColors = true;
-      material.color.set(0xffffff);
-    }
-    material.needsUpdate = true;
-      
-    // 标记需要重新渲染
-    needsRenderRef.current = true;
+    applyColorModeUtil(pointCloudRef.current, mode, originalColorsRef.current, needsRenderRef);
   }, []);
 
   // 加载点云数据
@@ -502,138 +472,370 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
       
       // 清空原始颜色缓存
       originalColorsRef.current = null;
+      originalRGBARef.current = null;
+      
+      // 重置颜色模式为不着色（加载新点云时重置）
+      colorModeRef.current = 'none';
+      setColorMode('none');
+      setLoadError(null);
 
-      // 获取文件名（从 window 对象或 URL）
-      const fileName = (window as any).__pointCloudFileName || url;
+      // 获取文件名（从 prop 或 URL）
+      const fileName = pointCloudFileName || url;
       const fileExt = fileName.split('.').pop()?.toLowerCase();
       
-      console.log('加载点云文件:', { fileName, fileExt, url });
+      debugLog('加载点云文件:', { fileName, fileExt, url });
       
       let pointCloud: THREE.Points;
 
       if (fileExt === 'pcd') {
         // 使用 PCDLoader 加载 PCD 文件
         const loader = new PCDLoader();
-        pointCloud = await new Promise<THREE.Points>((resolve, reject) => {
-          loader.load(
-            url,
-            (points: THREE.Points) => {
-              // 处理 PCD 点云的颜色和强度
-              const geometry = points.geometry;
-              const attributes = geometry.attributes;
+        
+        // 先加载点云
+        const points = await new Promise<THREE.Points>((resolve, reject) => {
+          loader.load(url, resolve, undefined, reject);
+        });
+        
+        // 处理 PCD 点云的颜色和强度
+        const geometry = points.geometry;
+        const attributes = geometry.attributes;
+        
+        let hasColorAttr = !!attributes.color;
+        const hasIntensityAttr = !!attributes.intensity;
+        let manualColorParsed = false;
+        
+        debugLog('PCD 加载完成，hasColorAttr:', hasColorAttr, 'attributes:', Object.keys(attributes));
+        
+        // 如果 PCDLoader 已经解析了颜色，保存到 originalColorsRef
+        if (hasColorAttr && attributes.color) {
+          const colorArray = attributes.color.array as Float32Array;
+          originalColorsRef.current = new Float32Array(colorArray);
+          debugLog('PCDLoader 已解析颜色，保存到 originalColorsRef:', originalColorsRef.current.length);
+        }
+        
+        // 检测颜色格式并保存原始数据（无论 PCDLoader 是否已解析颜色）
+        try {
+          const response = await fetch(url);
+          const buffer = await response.arrayBuffer();
+          const text = new TextDecoder().decode(buffer.slice(0, 2048));
+          const headerEnd = text.indexOf('DATA');
+          const headerText = text.slice(0, headerEnd);
+          const fieldsMatch = /^FIELDS (.*)$/m.exec(headerText);
+          const sizesMatch = /^SIZE (.*)$/m.exec(headerText);
+          
+          if (fieldsMatch && sizesMatch) {
+            const fields = fieldsMatch[1].split(' ');
+            
+            // 大小写不敏感的字段检测
+            const fieldsLower = fields.map(f => f.toLowerCase());
+            
+            // 查找 rgb/rgba 字段索引
+            const rgbaIndex = fieldsLower.indexOf('rgba');
+            const rgbIndex = fieldsLower.indexOf('rgb');
+            
+            // === 从 PCDLoader 已解析的颜色属性反推原始字节值 ===
+            // PCDLoader 对 rgb/rgba 做了 sRGB→Linear 转换，我们反向转回 sRGB 得到原始字节
+            const linearToSRGB = (c: number): number => {
+              if (c <= 0.0031308) return c * 12.92;
+              return 1.055 * Math.pow(c, 1.0 / 2.4) - 0.055;
+            };
+
+            if ((rgbaIndex >= 0 || rgbIndex >= 0) && hasColorAttr && attributes.color) {
+              const isRGBA = rgbaIndex >= 0;
+              const formatName = isRGBA ? 'rgba' : 'rgb';
+              setDetectedColorFormat(formatName);
+              setRgbaOrder(formatName as RGBAOrder | RGBOrder);
+              debugLog('检测到颜色格式:', formatName);
+
+              const colorArray = attributes.color.array as Float32Array;
+              const positionCount = attributes.position.count;
+              const originalPacked = new Uint32Array(positionCount);
+
+              for (let i = 0; i < positionCount; i++) {
+                // PCDLoader 输出是 Linear RGB，反转为 sRGB 得到原始字节
+                const rLinear = colorArray[i * 3];
+                const gLinear = colorArray[i * 3 + 1];
+                const bLinear = colorArray[i * 3 + 2];
+                const r = Math.round(Math.max(0, Math.min(1, linearToSRGB(rLinear))) * 255);
+                const g = Math.round(Math.max(0, Math.min(1, linearToSRGB(gLinear))) * 255);
+                const b = Math.round(Math.max(0, Math.min(1, linearToSRGB(bLinear))) * 255);
+                if (isRGBA) {
+                  // RGBA 格式: 打包为 0xRRGGBBAA（Alpha 默认 0xFF）
+                  originalPacked[i] = ((r << 24) | (g << 16) | (b << 8) | 0xFF) >>> 0;
+                } else {
+                  // RGB 格式: 打包为 0x00RRGGBB
+                  originalPacked[i] = (r << 16) | (g << 8) | b;
+                }
+              }
+              originalRGBARef.current = originalPacked;
+              debugLog(`从 PCDLoader 颜色反推 ${formatName} 原始字节:`, positionCount,
+                'sample:', '0x' + originalPacked[0]?.toString(16).padStart(8, '0'));
+
               
-              let hasColorAttr = !!attributes.color;
-              const hasIntensityAttr = !!attributes.intensity;
+            } else if ((fieldsLower.includes('r') || fieldsLower.includes('red')) &&
+                       (fieldsLower.includes('g') || fieldsLower.includes('green')) &&
+                       (fieldsLower.includes('b') || fieldsLower.includes('blue'))) {
+              setDetectedColorFormat('separate');
+              debugLog('检测到颜色格式: separate (r,g,b)');
+            }
+          }
+        } catch (err) {
+          debugLog('检测颜色格式失败:', err);
+        }
+        
+        // 检查是否有 rgba 或 rgb 字段（PCDLoader 不自动处理的情况）
+        if (!hasColorAttr) {
+          try {
+            const response = await fetch(url);
+            const buffer = await response.arrayBuffer();
+            const text = new TextDecoder().decode(buffer.slice(0, 2048));
+            const headerEnd = text.indexOf('DATA');
+            const headerText = text.slice(0, headerEnd);
+            
+            // 解析字段
+            const fieldsMatch = /^FIELDS (.*)$/m.exec(headerText);
+            const sizesMatch = /^SIZE (.*)$/m.exec(headerText);
+            
+            if (fieldsMatch && sizesMatch) {
+              const fields = fieldsMatch[1].split(' ');
+              const sizes = sizesMatch[1].split(' ').map(Number);
               
-              // 检查是否有 rgba 字段（PCDLoader 不自动处理 rgba）
-              if (!hasColorAttr) {
-                fetch(url)
-                  .then(res => res.arrayBuffer())
-                  .then(buffer => {
-                    const text = new TextDecoder().decode(buffer.slice(0, 2048));
-                    const hasRGBA = /^FIELDS.*rgba/m.test(text);
-                    
-                    if (hasRGBA) {
-                      // 手动解析 rgba 数据
-                      const headerEnd = text.indexOf('DATA');
-                      const headerText = text.slice(0, headerEnd);
-                      
-                      // 解析字段偏移
-                      const fieldsMatch = /^FIELDS (.*)$/m.exec(headerText);
-                      const sizesMatch = /^SIZE (.*)$/m.exec(headerText);
-                      
-                      if (fieldsMatch && sizesMatch) {
-                        const fields = fieldsMatch[1].split(' ');
-                        const sizes = sizesMatch[1].split(' ').map(Number);
-                        
-                        const rgbaIndex = fields.indexOf('rgba');
-                        if (rgbaIndex >= 0) {
-                          const positionCount = attributes.position.count;
-                          const colors = new Float32Array(positionCount * 3);
-                          
-                          // 计算 rgba 的偏移量
-                          let rgbaOffset = 0;
-                          for (let i = 0; i < rgbaIndex; i++) {
-                            rgbaOffset += sizes[i];
-                          }
-                          
-                          // 计算每行大小
-                          const rowSize = sizes.reduce((a, b) => a + b, 0);
-                          
-                          // 数据起始位置（binary 格式）
-                          const dataStart = text.indexOf('\n', text.indexOf('DATA')) + 1;
-                          const dataview = new DataView(buffer.slice(dataStart));
-                          
-                          for (let i = 0; i < positionCount; i++) {
-                            const rgba = dataview.getUint32(i * rowSize + rgbaOffset, true);
-                            const r = ((rgba >> 0) & 0xFF) / 255;
-                            const g = ((rgba >> 8) & 0xFF) / 255;
-                            const b = ((rgba >> 16) & 0xFF) / 255;
-                            // 忽略 alpha: (rgba >> 24) & 0xFF
-                            
-                            colors[i * 3] = r;
-                            colors[i * 3 + 1] = g;
-                            colors[i * 3 + 2] = b;
-                          }
-                          
-                          geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-                          
-                          // 保存原始颜色到 ref，供后续切换使用
-                          originalColorsRef.current = new Float32Array(colors);
-                          
-                          console.log('手动解析 rgba 颜色成功，点数:', positionCount);
-                          
-                          // 更新状态
-                          setHasColor(true);
-                        }
-                      }
-                    }
-                  })
-                  .catch(err => console.warn('检查 rgba 字段失败:', err));
+              // 大小写不敏感的字段检测辅助函数
+              const findFieldIndex = (fieldNames: string[]) => {
+                for (let i = 0; i < fields.length; i++) {
+                  const fieldLower = fields[i].toLowerCase();
+                  if (fieldNames.includes(fieldLower)) {
+                    return i;
+                  }
+                }
+                return -1;
+              };
+              
+              // 检查是否有 rgba 字段（支持大小写）
+              const rgbaIndex = findFieldIndex(['rgba']);
+              const hasRGBA = rgbaIndex >= 0;
+              
+              // 检查是否有 rgb 字段（打包的 rgb，支持大小写）
+              const rgbIndex = findFieldIndex(['rgb']);
+              const hasRGBPacked = rgbIndex >= 0;
+              
+              // 检查是否有分开的颜色字段（支持 r/red, g/green, b/blue，大小写不敏感）
+              const rIndex = findFieldIndex(['r', 'red']);
+              const gIndex = findFieldIndex(['g', 'green']);
+              const bIndex = findFieldIndex(['b', 'blue']);
+              const hasRGB = rIndex >= 0 && gIndex >= 0 && bIndex >= 0;
+              
+              const positionCount = attributes.position.count;
+              const colors = new Float32Array(positionCount * 3);
+              
+              // 检查是否是压缩格式（DATA 行在 headerText 之外，需在 text 中查找）
+              const isCompressed = text.includes('DATA binary_compressed');
+              debugLog('PCD 格式:', isCompressed ? 'binary_compressed' : 'binary', '字段:', { hasRGBA, hasRGBPacked, hasRGB });
+              
+              let dataview: DataView;
+              
+              if (isCompressed) {
+                // 压缩格式：需要解压
+                const dataStart = text.indexOf('DATA');
+                const dataOffset = text.indexOf('\n', dataStart) + 1;
+                const compressedData = new Uint8Array(buffer.slice(dataOffset));
+                
+                // 读取压缩和解压大小（前8字节）
+                const lzfHeader = new Uint32Array(compressedData.buffer.slice(0, 8));
+                const compressedSize = lzfHeader[0];
+                const decompressedSize = lzfHeader[1];
+                
+                // 解压数据
+                const decompressed = decompressLZF(
+                  compressedData.slice(8, 8 + compressedSize),
+                  decompressedSize
+                );
+                dataview = new DataView(decompressed.buffer);
+                debugLog('LZF 解压:', compressedSize, '->', decompressedSize);
+              } else {
+                // 非压缩格式
+                const dataStart = text.indexOf('\n', text.indexOf('DATA')) + 1;
+                dataview = new DataView(buffer.slice(dataStart));
               }
               
-              console.log('PCD 属性:', {
-                hasColor: hasColorAttr,
-                hasIntensity: hasIntensityAttr,
-                hasNormal: !!attributes.normal,
-                positionCount: attributes.position.count
-              });
+              debugLog('PCD 字段检测:', { hasRGBA, hasRGBPacked, hasRGB, fields, rIndex, gIndex, bIndex });
               
-              setHasColor(hasColorAttr);
-              setHasIntensity(hasIntensityAttr);
-              
-              // 默认不着色，让用户自己选择
-              setColorMode('none');
-              
-              resolve(points);
-            },
-            undefined,
-            (error: unknown) => reject(error)
-          );
+              if (hasRGBA) {
+                // 解析 rgba 字段
+                let rgbaOffset = 0;
+                for (let i = 0; i < rgbaIndex; i++) {
+                  rgbaOffset += sizes[i];
+                }
+                const rowSize = sizes.reduce((a, b) => a + b, 0);
+                const rgbaFieldSize = sizes[rgbaIndex];
+                
+                // 保存原始 rgba 数据（用于后续通道切换）
+                // PCD 原始字节 [B,G,R,A]，LE uint32 = 0xAARRGGBB
+                // 重新打包为标准大端序 RGBA: 0xRRGGBBAA
+                const originalRGBA = new Uint32Array(positionCount);
+                for (let i = 0; i < positionCount; i++) {
+                  // 压缩格式解压后是列主序，非压缩格式是行主序
+                  const offset = isCompressed
+                    ? rgbaOffset * positionCount + i * rgbaFieldSize
+                    : i * rowSize + rgbaOffset;
+                  const raw = dataview.getUint32(offset, true); // 0xAARRGGBB
+                  const r = (raw >> 16) & 0xFF;
+                  const g = (raw >> 8) & 0xFF;
+                  const b = raw & 0xFF;
+                  const a = (raw >> 24) & 0xFF;
+                  originalRGBA[i] = ((r << 24) | (g << 16) | (b << 8) | a) >>> 0; // 0xRRGGBBAA
+                }
+                originalRGBARef.current = originalRGBA;
+                
+                // 获取当前选择的颜色通道顺序
+                const order = RGBA_ORDER_MAP[rgbaOrder];
+                
+                for (let i = 0; i < positionCount; i++) {
+                  const rgba = originalRGBA[i];
+                  // 根据选择的通道顺序解析
+                  const r = ((rgba >> order.r) & 0xFF) / 255;
+                  const g = ((rgba >> order.g) & 0xFF) / 255;
+                  const b = ((rgba >> order.b) & 0xFF) / 255;
+                  
+                  colors[i * 3] = r;
+                  colors[i * 3 + 1] = g;
+                  colors[i * 3 + 2] = b;
+                }
+                
+                geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+                originalColorsRef.current = new Float32Array(colors);
+                debugLog('手动解析 rgba 颜色成功，通道顺序:', rgbaOrder, '点数:', positionCount);
+                manualColorParsed = true;
+                setDetectedColorFormat('rgba');
+                
+              } else if (hasRGBPacked) {
+                // 解析 rgb 字段（打包的 rgb，float32 格式，实际存储为 int 的 float 表示）
+                let rgbOffset = 0;
+                for (let i = 0; i < rgbIndex; i++) {
+                  rgbOffset += sizes[i];
+                }
+                const rowSize = sizes.reduce((a, b) => a + b, 0);
+                const rgbFieldSize = sizes[rgbIndex];
+                
+                // 保存原始 rgb 数据（用于后续通道切换）
+                // PCD rgb 字段是 float32，但存储的是 int 的位模式，直接用 getUint32 读取
+                // LE 读取后 uint32 值为 0x00RRGGBB，已符合 RGB ORDER_MAP 的位移定义
+                const originalRGB = new Uint32Array(positionCount);
+                for (let i = 0; i < positionCount; i++) {
+                  // 压缩格式解压后是列主序，非压缩格式是行主序
+                  const offset = isCompressed
+                    ? rgbOffset * positionCount + i * rgbFieldSize
+                    : i * rowSize + rgbOffset;
+                  originalRGB[i] = dataview.getUint32(offset, true);
+                }
+                originalRGBARef.current = originalRGB; // 复用同一个 ref
+                
+                // 获取当前选择的颜色通道顺序（rgb 使用 RGB 顺序，没有 A）
+                const order = RGBA_ORDER_MAP[rgbaOrder];
+                
+                for (let i = 0; i < positionCount; i++) {
+                  const rgb = originalRGB[i];
+                  // 根据选择的通道顺序解析（rgb 只有 RGB，没有 Alpha）
+                  const r = ((rgb >> order.r) & 0xFF) / 255;
+                  const g = ((rgb >> order.g) & 0xFF) / 255;
+                  const b = ((rgb >> order.b) & 0xFF) / 255;
+                  
+                  colors[i * 3] = r;
+                  colors[i * 3 + 1] = g;
+                  colors[i * 3 + 2] = b;
+                }
+                
+                geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+                originalColorsRef.current = new Float32Array(colors);
+                debugLog('手动解析 rgb 颜色成功，originalColorsRef:', originalColorsRef.current?.length);
+                manualColorParsed = true;
+                setDetectedColorFormat('rgb');
+                
+              } else if (hasRGB) {
+                // 解析分开的 r,g,b 字段（使用已检测到的索引）
+                let rOffset = 0, gOffset = 0, bOffset = 0;
+                for (let i = 0; i < rIndex; i++) rOffset += sizes[i];
+                for (let i = 0; i < gIndex; i++) gOffset += sizes[i];
+                for (let i = 0; i < bIndex; i++) bOffset += sizes[i];
+                
+                const rowSize = sizes.reduce((a, b) => a + b, 0);
+                const rFieldSize = sizes[rIndex];
+                const gFieldSize = sizes[gIndex];
+                const bFieldSize = sizes[bIndex];
+                
+                for (let i = 0; i < positionCount; i++) {
+                  // 压缩格式解压后是列主序，非压缩格式是行主序
+                  const rOff = isCompressed ? rOffset * positionCount + i * rFieldSize : i * rowSize + rOffset;
+                  const gOff = isCompressed ? gOffset * positionCount + i * gFieldSize : i * rowSize + gOffset;
+                  const bOff = isCompressed ? bOffset * positionCount + i * bFieldSize : i * rowSize + bOffset;
+                  const r = dataview.getFloat32(rOff, true);
+                  const g = dataview.getFloat32(gOff, true);
+                  const b = dataview.getFloat32(bOff, true);
+                  
+                  colors[i * 3] = r;
+                  colors[i * 3 + 1] = g;
+                  colors[i * 3 + 2] = b;
+                }
+                
+                geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+                originalColorsRef.current = new Float32Array(colors);
+                debugLog('手动解析 rgb 颜色成功，点数:', positionCount);
+                manualColorParsed = true;
+                setDetectedColorFormat('separate');
+              }
+            }
+          } catch (err) {
+            console.warn('检查颜色字段失败:', err);
+          }
+        }
+        
+        debugLog('PCD 属性:', {
+          hasColor: hasColorAttr,
+          hasIntensity: hasIntensityAttr,
+          hasNormal: !!attributes.normal,
+          positionCount: attributes.position.count,
+          manualColorParsed
         });
-      } else if (fileExt === 'ply' || fileExt === 'las') {
+        
+        setHasColor(hasColorAttr || manualColorParsed);
+        setHasIntensity(hasIntensityAttr);
+        
+        pointCloud = points;
+      } else if (fileExt === 'las' || fileExt === 'laz' || fileExt === 'ply') {
         throw new Error(`暂不支持 ${fileExt.toUpperCase()} 格式，请使用 PCD 格式`);
       } else {
         throw new Error(`不支持的文件格式: ${fileExt}，请使用 PCD 格式`);
       }
       sceneRef.current.add(pointCloud);
       pointCloudRef.current = pointCloud;
+      
+      // 设置材质：默认不着色（加载新点云时重置为白色）
+      const material = pointCloud.material as THREE.PointsMaterial;
+      material.vertexColors = false;
+      material.color.set(COLOR_VALUES.DEFAULT_VERTEX);
+      material.needsUpdate = true;
 
       // 自动调整相机位置 - 保持俯视角度
       const boundingBox = new THREE.Box3().setFromObject(pointCloud);
       const center = boundingBox.getCenter(new THREE.Vector3());
       const size = boundingBox.getSize(new THREE.Vector3());
       
-      console.log('点云信息:', {
+      debugLog('点云信息:', {
         center: { x: center.x, y: center.y, z: center.z },
         size: { x: size.x, y: size.y, z: size.z },
         pointsCount: pointCloud.geometry.attributes.position.count
       });
       
+      // 将坐标轴移动到点云中心
+      if (axesHelperRef.current) {
+        axesHelperRef.current.position.copy(center);
+        debugLog('坐标轴已移动到点云中心:', center);
+      }
+      
       const maxDim = Math.max(size.x, size.y, size.z);
       const fov = cameraRef.current!.fov * (Math.PI / 180);
       let cameraZ = maxDim / (2 * Math.tan(fov / 2));
-      cameraZ *= 2.0; // 增加距离以便更好地查看
+      cameraZ *= SCENE_CONFIG.CAMERA_DISTANCE_MULTIPLIER; // 增加距离以便更好地查看
 
       // 保持俯视角：X 轴向上，Y 轴向左，Z 轴朝向观察者
       cameraRef.current!.position.set(center.x, center.y, center.z + cameraZ);
@@ -647,17 +849,16 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
 
     } catch (error) {
       console.error('Failed to load point cloud:', error);
-      const errorMessage = error instanceof Error ? error.message : '未知错误';
-      alert(`加载点云失败: ${errorMessage}\n\n请检查:\n1. 文件格式是否正确\n2. 文件是否损坏\n3. 浏览器控制台查看详细错误`);
+      setLoadError(error instanceof Error ? error.message : '未知错误');
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [pointCloudFileName]);
 
   // 加载点云文件
   useEffect(() => {
     if (pointCloudUrl) {
-      console.log('开始加载点云:', pointCloudUrl);
+      debugLog('开始加载点云:', pointCloudUrl);
       loadPointCloud(pointCloudUrl);
     }
   }, [pointCloudUrl, loadPointCloud]);
@@ -691,7 +892,7 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
       }
       
       if (allValues.length !== 16 || allValues.some(isNaN)) {
-        alert('请输入 16 个数字（4x4 矩阵）');
+        console.warn('变换矩阵需要 16 个数字');
         return;
       }
       
@@ -723,7 +924,7 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
         onTransformApply?.(allValues);
       }
     } catch (error) {
-      alert('变换矩阵格式错误');
+      console.warn('变换矩阵格式错误:', error);
     }
   };
 
@@ -739,13 +940,13 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
 
   // 应用变换矩阵
   useEffect(() => {
-    console.log('变换矩阵 useEffect:', { 
+    debugLog('变换矩阵 useEffect:', { 
       hasPointCloud: !!pointCloudRef.current, 
       transformMatrix 
     });
     
     if (!pointCloudRef.current || !transformMatrix) {
-      console.log('跳过变换：', {
+      debugLog('跳过变换：', {
         hasPointCloud: !!pointCloudRef.current,
         hasTransformMatrix: !!transformMatrix
       });
@@ -757,13 +958,13 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
     
     // 保存原始位置（如果没有保存过）
     if (!(geometry as any).__originalPositions) {
-      console.log('保存原始位置');
+      debugLog('保存原始位置');
       (geometry as any).__originalPositions = new Float32Array(positions);
     }
     
     const originalPositions = (geometry as any).__originalPositions as Float32Array;
     
-    console.log('开始应用变换矩阵...', {
+    debugLog('开始应用变换矩阵...', {
       pointCount: positions.length / 3,
       matrix: transformMatrix
     });
@@ -794,7 +995,7 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
     const maxDim = Math.max(size.x, size.y, size.z);
     const fov = cameraRef.current!.fov * (Math.PI / 180);
     let cameraZ = maxDim / (2 * Math.tan(fov / 2));
-    cameraZ *= 2.0;
+    cameraZ *= SCENE_CONFIG.CAMERA_DISTANCE_MULTIPLIER;
     
     // 保持俯视角
     cameraRef.current!.position.set(center.x, center.y, center.z + cameraZ);
@@ -805,174 +1006,9 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
     controlsRef.current!.target.copy(center);
     controlsRef.current!.update();
     
-    console.log('变换完成！');
   }, [transformMatrix]);
 
-  // 获取或创建标签纹理（带缓存）
-  const getLabelTexture = useCallback((label: string, colorHex: string): THREE.CanvasTexture => {
-    const cacheKey = `${label}_${colorHex}`;
-    if (labelTextureCacheRef.current.has(cacheKey)) {
-      return labelTextureCacheRef.current.get(cacheKey)!;
-    }
-    
-    const canvas = document.createElement('canvas');
-    const context = canvas.getContext('2d');
-    if (!context) throw new Error('Failed to get canvas context');
-    
-    canvas.width = 256;
-    canvas.height = 64;
-    context.fillStyle = colorHex;
-    context.fillRect(0, 0, 256, 64);
-    context.fillStyle = '#ffffff';
-    context.font = 'bold 32px Arial';
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    context.fillText(label, 128, 32);
-
-    const texture = new THREE.CanvasTexture(canvas);
-    labelTextureCacheRef.current.set(cacheKey, texture);
-    return texture;
-  }, []);
-
-  // 绘制 3D 边界框
-  const drawBBox3D = useCallback((annotation: BBox3DAnnotation) => {
-    if (!annotationGroupRef.current) return;
-
-    const color = new THREE.Color(annotation.color || getLabelColor(annotation.label, 0));
-    const colorHex = '#' + color.getHexString();
-    const { center, dimensions, rotation } = annotation;
-    const [length, width, height] = dimensions;
-
-    // 创建边界框几何体
-    const geometry = new THREE.BoxGeometry(length, height, width);
-    
-    // 创建线框材质
-    const edges = new THREE.EdgesGeometry(geometry);
-    const material = new THREE.LineBasicMaterial({ 
-      color, 
-      linewidth: 2,
-    });
-    
-    const wireframe = new THREE.LineSegments(edges, material);
-    
-    // 设置位置
-    wireframe.position.set(center.x, center.y, center.z);
-    
-    // 设置旋转
-    const rotationType = annotation.rotationType || 'euler';
-    if (rotationType === 'euler') {
-      const [roll, pitch, yaw] = rotation as [number, number, number];
-      wireframe.rotation.set(roll, pitch, yaw);
-    } else {
-      // 四元数旋转
-      const quaternion = rotation as unknown as [number, number, number, number];
-      wireframe.quaternion.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
-    }
-
-    annotationGroupRef.current.add(wireframe);
-
-    // 添加标签（使用缓存的纹理）
-    const texture = getLabelTexture(annotation.label, colorHex);
-    const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
-    const sprite = new THREE.Sprite(spriteMaterial);
-    sprite.position.set(center.x, center.y + height / 2 + 1, center.z);
-    sprite.scale.set(4, 1, 1);
-    annotationGroupRef.current.add(sprite);
-  }, [getLabelTexture]);
-
-  // 绘制 3D 多边形
-  const drawPolygon3D = useCallback((annotation: Polygon3DAnnotation) => {
-    if (!annotationGroupRef.current || annotation.points.length < 3) return;
-
-    const color = new THREE.Color(annotation.color || getLabelColor(annotation.label, 0));
-
-    // 创建多边形几何体
-    const shape = new THREE.Shape();
-    const points = annotation.points;
-    
-    shape.moveTo(points[0].x, points[0].z);
-    for (let i = 1; i < points.length; i++) {
-      shape.lineTo(points[i].x, points[i].z);
-    }
-    shape.closePath();
-
-    const geometry = new THREE.ShapeGeometry(shape);
-    const material = new THREE.MeshBasicMaterial({ 
-      color, 
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.3,
-    });
-    
-    const mesh = new THREE.Mesh(geometry, material);
-    
-    // 设置 Y 坐标（使用平均高度）
-    const avgY = points.reduce((sum, p) => sum + p.y, 0) / points.length;
-    mesh.position.y = avgY;
-    mesh.rotation.x = -Math.PI / 2; // 旋转到 XZ 平面
-
-    annotationGroupRef.current.add(mesh);
-
-    // 添加边框
-    const edges = new THREE.EdgesGeometry(geometry);
-    const lineMaterial = new THREE.LineBasicMaterial({ color });
-    const wireframe = new THREE.LineSegments(edges, lineMaterial);
-    wireframe.position.y = avgY;
-    wireframe.rotation.x = -Math.PI / 2;
-    annotationGroupRef.current.add(wireframe);
-  }, []);
-
-  // 绘制 3D 折线（车道线等）
-  const drawPolyline3D = useCallback((annotation: Polyline3DAnnotation) => {
-    if (!annotationGroupRef.current || annotation.points.length < 2) return;
-
-    const color = new THREE.Color(annotation.color || getLabelColor(annotation.label, 0));
-
-    // 创建线条几何体
-    const geometry = new THREE.BufferGeometry();
-    const positions = new Float32Array(annotation.points.length * 3);
-
-    annotation.points.forEach((point, i) => {
-      positions[i * 3] = point.x;
-      positions[i * 3 + 1] = point.y;
-      positions[i * 3 + 2] = point.z;
-    });
-
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-
-    const material = new THREE.LineBasicMaterial({ 
-      color, 
-      linewidth: 2,
-    });
-
-    const line = new THREE.Line(geometry, material);
-    annotationGroupRef.current.add(line);
-
-    // 绘制端点
-    annotation.points.forEach((point) => {
-      const sphereGeometry = new THREE.SphereGeometry(0.2, 16, 16);
-      const sphereMaterial = new THREE.MeshBasicMaterial({ color });
-      const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
-      sphere.position.set(point.x, point.y, point.z);
-      if (annotationGroupRef.current) {
-        annotationGroupRef.current.add(sphere);
-      }
-    });
-  }, []);
-
-  // 绘制 3D 点
-  const drawPoint3D = useCallback((annotation: Point3DAnnotation) => {
-    if (!annotationGroupRef.current) return;
-
-    const color = new THREE.Color(annotation.color || getLabelColor(annotation.label, 0));
-
-    // 创建球体表示点
-    const geometry = new THREE.SphereGeometry(0.3, 16, 16);
-    const material = new THREE.MeshBasicMaterial({ color });
-    const sphere = new THREE.Mesh(geometry, material);
-    sphere.position.set(annotation.point.x, annotation.point.y, annotation.point.z);
-    annotationGroupRef.current.add(sphere);
-  }, []);
+  // 获取或创建标签纹理（带缓存）- 已提取到 annotationRenderer
 
   // 更新标注（优化版：增量更新）
   useEffect(() => {
@@ -981,68 +1017,55 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
     const currentIds = new Set(annotations.filter(a => !hiddenIds.has(a.id)).map(a => a.id));
     const pool = annotationPoolRef.current;
     
-    // 1. 移除不再需要的标注（回收或销毁）
+    // 1. 移除不再需要的标注
     const toRemove: string[] = [];
     pool.forEach((objects, id) => {
       if (!currentIds.has(id)) {
         objects.forEach(obj => {
           annotationGroupRef.current!.remove(obj);
-          // 释放几何体和材质
-          if ((obj as any).geometry) (obj as any).geometry.dispose();
-          if ((obj as any).material) {
-            const mat = (obj as any).material;
-            if (mat.map) mat.map.dispose();
-            mat.dispose();
-          }
+          disposeObject3D(obj);
         });
         toRemove.push(id);
       }
     });
     toRemove.forEach(id => pool.delete(id));
 
-    // 2. 添加或更新标注
+    // 2. 添加新标注
     annotations.forEach((annotation) => {
       if (hiddenIds.has(annotation.id)) return;
-      
-      // 如果已存在，跳过（假设标注数据不变）
       if (pool.has(annotation.id)) return;
 
       const group = annotationGroupRef.current;
       if (!group) return;
       
-      // 创建新标注对象数组
       const newObjects: THREE.Object3D[] = [];
-      
-      // 临时拦截 add 方法收集对象
       const originalAdd = group.add.bind(group);
       group.add = (obj: THREE.Object3D) => {
         newObjects.push(obj);
         return originalAdd(obj);
       };
 
-      // 绘制标注
       switch (annotation.type) {
         case AnnotationType.BBOX_3D:
-          drawBBox3D(annotation as BBox3DAnnotation);
+          drawBBox3D(group, annotation as BBox3DAnnotation);
           break;
         case AnnotationType.POLYGON_3D:
-          drawPolygon3D(annotation as Polygon3DAnnotation);
+          drawPolygon3D(group, annotation as Polygon3DAnnotation);
           break;
         case AnnotationType.POLYLINE_3D:
-          drawPolyline3D(annotation as Polyline3DAnnotation);
+          drawPolyline3D(group, annotation as Polyline3DAnnotation);
           break;
         case AnnotationType.POINT_3D:
-          drawPoint3D(annotation as Point3DAnnotation);
+          drawPoint3D(group, annotation as Point3DAnnotation);
           break;
       }
 
-      // 恢复原始 add 方法
       group.add = originalAdd;
-      
-      // 保存到对象池
       pool.set(annotation.id, newObjects);
     });
-  }, [annotations, hiddenIds, drawBBox3D, drawPolygon3D, drawPolyline3D, drawPoint3D]);
+
+    needsRenderRef.current = true;
+  }, [annotations, hiddenIds]);
 
   // 处理拖放
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -1112,27 +1135,12 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
         </div>
       )}
 
-      {/* 操作提示 */}
-      {pointCloudUrl && !isLoading && (
-        <div className="absolute bottom-4 right-4 z-10 bg-black/70 text-white p-3 rounded-lg text-xs backdrop-blur-sm pointer-events-none">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <span className="font-medium">🖱️ 左键拖动</span>
-              <span className="text-gray-300">旋转</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="font-medium">🖱️ 右键拖动</span>
-              <span className="text-gray-300">平移</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="font-medium">🖱️ 滚轮</span>
-              <span className="text-gray-300">缩放</span>
-            </div>
-            <div className="flex items-center gap-2 border-t border-gray-600 pt-1 mt-1">
-              <span className="font-medium">👆 双击</span>
-              <span className="text-gray-300">重置视角</span>
-            </div>
-          </div>
+      {/* 加载错误提示 */}
+      {loadError && !isLoading && (
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 bg-red-900/80 text-white p-4 rounded-lg text-sm max-w-md text-center">
+          <p className="font-medium mb-1">加载点云失败</p>
+          <p className="text-xs text-red-200">{loadError}</p>
+          <p className="text-xs text-red-300 mt-2">请检查文件格式和完整性</p>
         </div>
       )}
 
@@ -1160,7 +1168,7 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
       )}
 
       {/* 操作提示 */}
-      {pointCloudUrl && (
+      {pointCloudUrl && !isLoading && (
         <div className="absolute bottom-4 right-4 z-10 bg-black/70 text-white p-3 rounded-lg text-xs backdrop-blur-sm pointer-events-none">
           <div className="space-y-1">
             <div className="text-gray-400 font-medium mb-1">基础操作</div>
@@ -1198,6 +1206,7 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
           <div className="flex flex-col gap-1">
             <button
               onClick={() => {
+                colorModeRef.current = COLOR_MODES[0];
                 setColorMode(COLOR_MODES[0]);
                 applyColorMode(COLOR_MODES[0]);
               }}
@@ -1210,6 +1219,7 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
             </button>
             <button
               onClick={() => {
+                colorModeRef.current = COLOR_MODES[1];
                 setColorMode(COLOR_MODES[1]);
                 applyColorMode(COLOR_MODES[1]);
               }}
@@ -1224,6 +1234,7 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
             </button>
             <button
               onClick={() => {
+                colorModeRef.current = COLOR_MODES[2];
                 setColorMode(COLOR_MODES[2]);
                 applyColorMode(COLOR_MODES[2]);
               }}
@@ -1238,6 +1249,7 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
             </button>
             <button
               onClick={() => {
+                colorModeRef.current = COLOR_MODES[3];
                 setColorMode(COLOR_MODES[3]);
                 applyColorMode(COLOR_MODES[3]);
               }}
@@ -1249,6 +1261,70 @@ export const PointCloudCanvas = memo(function PointCloudCanvas({
               📏 高度 (Z轴)
             </button>
           </div>
+          
+          {/* 颜色通道顺序选择（仅当原始颜色模式、有颜色、且是打包格式时显示） */}
+          {hasColor && colorMode === 'original' && detectedColorFormat && detectedColorFormat !== 'separate' && (
+            <div className="mt-3 pt-3 border-t border-white/20 space-y-2">
+              <div>
+                <p className="mb-1 text-[10px] text-gray-400">
+                  颜色通道顺序
+                </p>
+                <select
+                  value={rgbaOrder}
+                  onChange={(e) => {
+                    const newOrder = e.target.value as RGBAOrder | RGBOrder;
+                    setRgbaOrder(newOrder);
+                    // 直接应用新的通道顺序（不重新加载文件）
+                    applyRGBAOrder(newOrder, colorGamma);
+                  }}
+                  className="w-full px-2 py-1 rounded bg-white/10 text-white text-[10px] border border-white/20 focus:outline-none focus:border-primary"
+                >
+                  {detectedColorFormat === 'rgb' 
+                    ? [
+                        { value: 'rgb', label: 'RGB' },
+                        { value: 'bgr', label: 'BGR' },
+                      ].map(opt => (
+                        <option key={opt.value} value={opt.value} className="bg-black">
+                          {opt.label}
+                        </option>
+                      ))
+                    : [
+                        { value: 'rgba', label: 'RGBA' },
+                        { value: 'bgra', label: 'BGRA' },
+                        { value: 'argb', label: 'ARGB' },
+                        { value: 'abgr', label: 'ABGR' },
+                      ].map(opt => (
+                        <option key={opt.value} value={opt.value} className="bg-black">
+                          {opt.label}
+                        </option>
+                      ))
+                  }
+                </select>
+              </div>
+              
+              <div>
+                <p className="mb-1 text-[10px] text-gray-400">颜色鲜艳度 (Gamma)</p>
+                <input
+                  type="range"
+                  min={GAMMA_CONFIG.MIN}
+                  max={GAMMA_CONFIG.MAX}
+                  step={GAMMA_CONFIG.STEP}
+                  value={colorGamma}
+                  onChange={(e) => {
+                    const newGamma = parseFloat(e.target.value);
+                    setColorGamma(newGamma);
+                    applyRGBAOrder(rgbaOrder, newGamma);
+                  }}
+                  className="w-full h-1 bg-white/20 rounded-lg appearance-none cursor-pointer"
+                />
+                <div className="flex justify-between text-[9px] text-gray-500 mt-1">
+                  <span>鲜艳</span>
+                  <span>{colorGamma.toFixed(1)}</span>
+                  <span>暗淡</span>
+                </div>
+              </div>
+            </div>
+          )}
           
           {/* 变换按钮 */}
           <div className="mt-3 pt-3 border-t border-white/20">

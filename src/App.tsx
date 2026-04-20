@@ -1,4 +1,5 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { Canvas } from '@/components/Canvas';
 import { PointCloudCanvas } from '@/components/PointCloudCanvas';
 import { JsonEditor } from '@/components/JsonEditor';
@@ -67,6 +68,18 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [bottomPanelCollapsed, setBottomPanelCollapsed] = useState(false);
 
+  // 点云文件名（替代 window 全局变量）
+  const pointCloudFileNameRef = useRef<string>('');
+
+  // Toast 提示状态
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = useCallback((message: string, duration = 3000) => {
+    setToastMessage(message);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToastMessage(null), duration);
+  }, []);
+
   // 切换数据类型
   const handleDataTypeChange = (type: DataType) => {
     setDataType(type);
@@ -85,191 +98,180 @@ function App() {
 
   // 解析标注数据
   const parseAnnotationData = useCallback((data: AnnotationData): Annotation[] => {
-    return data.shapes.map((shape): Annotation => {
+    // 基本结构校验
+    if (!data.shapes || !Array.isArray(data.shapes)) {
+      throw new Error('标注数据缺少 shapes 数组');
+    }
+
+    const results: Annotation[] = [];
+
+    for (const shape of data.shapes) {
+      if (!shape.shape_type) {
+        console.warn('跳过缺少 shape_type 的标注项:', shape);
+        continue;
+      }
+
       const baseId = generateId();
       const label = shape.label || '';
 
-      switch (shape.shape_type) {
-        case 'rectangle': {
-          if (!shape.points || shape.points.length < 2) {
-            throw new Error('Rectangle shape must have points');
-          }
-          const [p1, p2] = shape.points;
-          const bbox: BBoxAnnotation = {
-            id: baseId,
-            type: AnnotationType.BBOX,
-            label,
-            bbox: [p1[0], p1[1], p2[0] - p1[0], p2[1] - p1[1]],
-          };
-          return bbox;
-        }
-        case 'polygon': {
-          if (!shape.points) {
-            throw new Error('Polygon shape must have points');
-          }
-          const polygon: PolygonAnnotation = {
-            id: baseId,
-            type: AnnotationType.POLYGON,
-            label,
-            points: shape.points.map((p) => ({ x: p[0], y: p[1] })),
-          };
-          return polygon;
-        }
-        case 'line': {
-          if (!shape.points) {
-            throw new Error('Line shape must have points');
-          }
-          const polyline: PolylineAnnotation = {
-            id: baseId,
-            type: AnnotationType.POLYLINE,
-            label,
-            points: shape.points.map((p) => ({ x: p[0], y: p[1] })),
-          };
-          return polyline;
-        }
-        case 'point': {
-          if (!shape.points || shape.points.length === 0) {
-            throw new Error('Point shape must have points');
-          }
-          const point: PointAnnotation = {
-            id: baseId,
-            type: AnnotationType.POINT,
-            label,
-            point: { x: shape.points[0][0], y: shape.points[0][1] },
-          };
-          return point;
-        }
-        case 'segmentation': {
-          if (!shape.points) {
-            throw new Error('Segmentation shape must have points');
-          }
-          const seg: SegmentationAnnotation = {
-            id: baseId,
-            type: AnnotationType.SEGMENTATION,
-            label,
-            points: shape.points.map((p) => ({ x: p[0], y: p[1] })),
-          };
-          return seg;
-        }
-        // 3D 标注类型
-        case 'bbox_3d': {
-          // 支持新格式（center, size, rotation）和旧格式（points）
-          let center, dimensions, rotation;
-          
-          if (shape.center && shape.size && shape.rotation) {
-            // 新格式：分离的字段
-            center = { 
-              x: shape.center[0], 
-              y: shape.center[1], 
-              z: shape.center[2] 
-            };
-            dimensions = [shape.size[0], shape.size[1], shape.size[2]];
-            rotation = shape.rotation as [number, number, number];
-          } else if (shape.dimensions && shape.rotation) {
-            // 兼容格式：dimensions
-            if (!shape.points || shape.points.length === 0) {
-              throw new Error('BBox 3D shape with dimensions must have points for center');
+      try {
+        switch (shape.shape_type) {
+          case 'rectangle': {
+            if (!shape.points || shape.points.length < 2) {
+              console.warn('Rectangle 缺少 points，跳过');
+              continue;
             }
-            center = { 
-              x: shape.points[0][0], 
-              y: shape.points[0][1], 
-              z: shape.points[0][2] 
-            };
-            dimensions = shape.dimensions as [number, number, number];
-            rotation = shape.rotation as [number, number, number];
-          } else {
-            // 旧格式：points 数组
-            if (!shape.points || shape.points.length < 3) {
-              throw new Error('BBox 3D shape in old format must have at least 3 points');
-            }
-            center = { 
-              x: shape.points[0][0], 
-              y: shape.points[0][1], 
-              z: shape.points[0][2] 
-            };
-            dimensions = [shape.points[1][0], shape.points[1][1], shape.points[1][2]];
-            rotation = shape.points[2] as [number, number, number];
-          }
-          
-          const bbox3d: BBox3DAnnotation = {
-            id: baseId,
-            type: AnnotationType.BBOX_3D,
-            label,
-            center,
-            dimensions: dimensions as [number, number, number],
-            rotation: rotation as [number, number, number],
-            rotationType: 'euler',
-          };
-          return bbox3d;
-        }
-        case 'polygon_3d': {
-          if (!shape.points) {
-            throw new Error('Polygon 3D shape must have points');
-          }
-          const polygon3d: Polygon3DAnnotation = {
-            id: baseId,
-            type: AnnotationType.POLYGON_3D,
-            label,
-            points: shape.points.map((p) => ({ x: p[0], y: p[1], z: p[2] })),
-          };
-          return polygon3d;
-        }
-        case 'polyline_3d': {
-          if (!shape.points) {
-            throw new Error('Polyline 3D shape must have points');
-          }
-          const polyline3d: Polyline3DAnnotation = {
-            id: baseId,
-            type: AnnotationType.POLYLINE_3D,
-            label,
-            points: shape.points.map((p) => ({ x: p[0], y: p[1], z: p[2] })),
-          };
-          return polyline3d;
-        }
-        case 'point_3d': {
-          if (!shape.points || shape.points.length === 0) {
-            throw new Error('Point 3D shape must have points');
-          }
-          const point3d: Point3DAnnotation = {
-            id: baseId,
-            type: AnnotationType.POINT_3D,
-            label,
-            point: { x: shape.points[0][0], y: shape.points[0][1], z: shape.points[0][2] },
-          };
-          return point3d;
-        }
-        default:
-          if (!shape.points) {
-            throw new Error('Shape must have points');
-          }
-          if (shape.points.length === 1) {
-            const pt: PointAnnotation = {
-              id: baseId,
-              type: AnnotationType.POINT,
-              label,
-              point: { x: shape.points[0][0], y: shape.points[0][1] },
-            };
-            return pt;
-          } else if (shape.points.length === 2) {
-            const [pt1, pt2] = shape.points;
-            const box: BBoxAnnotation = {
+            const [p1, p2] = shape.points;
+            results.push({
               id: baseId,
               type: AnnotationType.BBOX,
               label,
-              bbox: [pt1[0], pt1[1], pt2[0] - pt1[0], pt2[1] - pt1[1]],
-            };
-            return box;
-          } else {
-            const poly: PolygonAnnotation = {
+              bbox: [p1[0], p1[1], p2[0] - p1[0], p2[1] - p1[1]],
+            } as BBoxAnnotation);
+            break;
+          }
+          case 'polygon': {
+            if (!shape.points || shape.points.length < 3) {
+              console.warn('Polygon 缺少足够的 points，跳过');
+              continue;
+            }
+            results.push({
               id: baseId,
               type: AnnotationType.POLYGON,
               label,
               points: shape.points.map((p) => ({ x: p[0], y: p[1] })),
-            };
-            return poly;
+            } as PolygonAnnotation);
+            break;
           }
+          case 'line': {
+            if (!shape.points || shape.points.length < 2) {
+              console.warn('Line 缺少足够的 points，跳过');
+              continue;
+            }
+            results.push({
+              id: baseId,
+              type: AnnotationType.POLYLINE,
+              label,
+              points: shape.points.map((p) => ({ x: p[0], y: p[1] })),
+            } as PolylineAnnotation);
+            break;
+          }
+          case 'point': {
+            if (!shape.points || shape.points.length === 0) {
+              console.warn('Point 缺少 points，跳过');
+              continue;
+            }
+            results.push({
+              id: baseId,
+              type: AnnotationType.POINT,
+              label,
+              point: { x: shape.points[0][0], y: shape.points[0][1] },
+            } as PointAnnotation);
+            break;
+          }
+          case 'segmentation': {
+            if (!shape.points || shape.points.length === 0) {
+              console.warn('Segmentation 缺少 points，跳过');
+              continue;
+            }
+            results.push({
+              id: baseId,
+              type: AnnotationType.SEGMENTATION,
+              label,
+              points: shape.points.map((p) => ({ x: p[0], y: p[1] })),
+            } as SegmentationAnnotation);
+            break;
+          }
+          // 3D 标注类型
+          case 'bbox_3d': {
+            let center, dimensions, rotation;
+            
+            if (shape.center && shape.size && shape.rotation) {
+              if (shape.center.length < 3 || shape.size.length < 3 || shape.rotation.length < 3) {
+                console.warn('BBox 3D 字段长度不足，跳过');
+                continue;
+              }
+              center = { x: shape.center[0], y: shape.center[1], z: shape.center[2] };
+              dimensions = [shape.size[0], shape.size[1], shape.size[2]];
+              rotation = shape.rotation as [number, number, number];
+            } else if (shape.dimensions && shape.rotation) {
+              if (!shape.points || shape.points.length === 0 || shape.points[0].length < 3) {
+                console.warn('BBox 3D (dimensions格式) 缺少有效的 center points，跳过');
+                continue;
+              }
+              center = { x: shape.points[0][0], y: shape.points[0][1], z: shape.points[0][2] };
+              dimensions = shape.dimensions as [number, number, number];
+              rotation = shape.rotation as [number, number, number];
+            } else {
+              if (!shape.points || shape.points.length < 3) {
+                console.warn('BBox 3D (旧格式) 缺少足够的 points，跳过');
+                continue;
+              }
+              center = { x: shape.points[0][0], y: shape.points[0][1], z: shape.points[0][2] };
+              dimensions = [shape.points[1][0], shape.points[1][1], shape.points[1][2]];
+              rotation = shape.points[2] as [number, number, number];
+            }
+            
+            results.push({
+              id: baseId,
+              type: AnnotationType.BBOX_3D,
+              label,
+              center,
+              dimensions: dimensions as [number, number, number],
+              rotation: rotation as [number, number, number],
+              rotationType: 'euler',
+            } as BBox3DAnnotation);
+            break;
+          }
+          case 'polygon_3d': {
+            if (!shape.points || shape.points.length < 3) {
+              console.warn('Polygon 3D 缺少足够的 points，跳过');
+              continue;
+            }
+            results.push({
+              id: baseId,
+              type: AnnotationType.POLYGON_3D,
+              label,
+              points: shape.points.map((p) => ({ x: p[0], y: p[1], z: p[2] || 0 })),
+            } as Polygon3DAnnotation);
+            break;
+          }
+          case 'polyline_3d': {
+            if (!shape.points || shape.points.length < 2) {
+              console.warn('Polyline 3D 缺少足够的 points，跳过');
+              continue;
+            }
+            results.push({
+              id: baseId,
+              type: AnnotationType.POLYLINE_3D,
+              label,
+              points: shape.points.map((p) => ({ x: p[0], y: p[1], z: p[2] || 0 })),
+            } as Polyline3DAnnotation);
+            break;
+          }
+          case 'point_3d': {
+            if (!shape.points || shape.points.length === 0 || shape.points[0].length < 3) {
+              console.warn('Point 3D 缺少有效的 points，跳过');
+              continue;
+            }
+            results.push({
+              id: baseId,
+              type: AnnotationType.POINT_3D,
+              label,
+              point: { x: shape.points[0][0], y: shape.points[0][1], z: shape.points[0][2] },
+            } as Point3DAnnotation);
+            break;
+          }
+          default:
+            console.warn(`未知标注类型 "${shape.shape_type}"，跳过`);
+            break;
+        }
+      } catch (e) {
+        console.warn(`解析标注 "${label}" (${shape.shape_type}) 失败:`, e);
       }
-    });
+    }
+
+    return results;
   }, []);
 
   // 解析JSON字符串为标注
@@ -340,21 +342,15 @@ function App() {
 
   // 处理点云文件
   const handlePointCloudFile = useCallback((file: File) => {
-    console.log('处理点云文件:', {
-      name: file.name,
-      size: file.size,
-      type: file.type
-    });
     const url = URL.createObjectURL(file);
-    console.log('创建点云 URL:', url);
     setPointCloudUrl((prevUrl) => {
       if (prevUrl) {
         URL.revokeObjectURL(prevUrl);
       }
       return url;
     });
-    // 保存文件名以便后续使用
-    (window as any).__pointCloudFileName = file.name;
+    // 保存文件名到 ref（替代 window 全局变量）
+    pointCloudFileNameRef.current = file.name;
   }, []);
 
   // 应用JSON编辑器内容
@@ -362,7 +358,7 @@ function App() {
     if (parseJsonString(jsonValue)) {
       // 成功
     } else {
-      alert('标注数据解析失败，请检查格式');
+      showToast('标注数据解析失败，请检查格式');
     }
   };
 
@@ -383,6 +379,7 @@ function App() {
   };
 
   return (
+    <ErrorBoundary>
     <div className="flex h-screen overflow-hidden bg-background">
       {/* 左侧边栏 */}
       <Sidebar
@@ -414,6 +411,7 @@ function App() {
               transformMatrix={transformMatrix}
               onTransformApply={handleApplyTransform}
               onTransformReset={handleResetTransform}
+              pointCloudFileName={pointCloudFileNameRef.current}
               className="h-full w-full"
             />
           ) : (
@@ -516,7 +514,14 @@ function App() {
           )}
         </div>
       </div>
+      {/* Toast 提示 */}
+      {toastMessage && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 bg-destructive text-destructive-foreground rounded-lg shadow-lg text-sm animate-in fade-in slide-in-from-bottom-4">
+          {toastMessage}
+        </div>
+      )}
     </div>
+    </ErrorBoundary>
   );
 }
 
